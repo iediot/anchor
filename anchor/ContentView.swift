@@ -8,17 +8,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Bindable var model: DiagnosticsModel
+
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
+        DiagnosticsView(model: model)
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView(model: DiagnosticsModel())
 }
