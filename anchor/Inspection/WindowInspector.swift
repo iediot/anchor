@@ -43,6 +43,7 @@ struct InspectedWindow: Identifiable {
     let availability: CaptureAvailability
     let fullScreen: FullScreenSignal
     let axTitleMatched: Bool
+    let documentPath: String?
 }
 
 struct WindowScan {
@@ -50,20 +51,30 @@ struct WindowScan {
     let target: DisplayTarget
     let accessibilityGranted: Bool
     let screenRecordingGranted: Bool
+    let lostPinnedDisplay: Bool
     let capturedAt: Date
 
     var inScope: [InspectedWindow] { windows.filter(\.inScope) }
     var outOfScope: [InspectedWindow] { windows.filter { !$0.inScope } }
+
+    // every on-screen window of one app, whatever display it landed on
+    // scope membership and window identity are separate questions
+    func windows(ofBundleID bundleID: String) -> [InspectedWindow] {
+        windows.filter { $0.bundleID == bundleID }
+    }
 }
 
 enum WindowInspector {
     // the on-screen option already drops minimized windows and other spaces
     // so the list is the current desktop of every display, which we then narrow to one display
-    static func scan(preferredOwner: pid_t?) -> WindowScan {
+    static func scan(preferredOwner: pid_t?, pinnedTarget: DisplayTarget? = nil) -> WindowScan {
         let raw = rawWindows()
+        let now = Date()
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let candidates = raw.compactMap { entry in candidate(from: entry, ownPID: ownPID) }
-        let target = DisplayTarget.resolve(from: candidates, preferredOwner: preferredOwner)
+        let target = pinnedTarget.flatMap { DisplayTarget.repin($0, at: now) }
+            ?? DisplayTarget.resolve(from: candidates, preferredOwner: preferredOwner)
+        let lostPin = pinnedTarget != nil && target.pinnedFrom == nil
         let granted = Permissions.accessibilityGranted
         let recording = Permissions.screenRecordingGranted
 
@@ -97,13 +108,15 @@ enum WindowInspector {
                                            scopeReason: reason ?? "on the target display and an ordinary window",
                                            availability: availability(for: candidate.bundleID),
                                            fullScreen: fullScreenSignal(candidate, facts: facts, granted: granted, target: target),
-                                           axTitleMatched: facts != nil))
+                                           axTitleMatched: facts != nil,
+                                           documentPath: facts?.documentPath))
         }
         return WindowScan(windows: windows,
                           target: target,
                           accessibilityGranted: granted,
                           screenRecordingGranted: recording,
-                          capturedAt: Date())
+                          lostPinnedDisplay: lostPin,
+                          capturedAt: now)
     }
 
     // the window server only fills in a name when screen recording is granted

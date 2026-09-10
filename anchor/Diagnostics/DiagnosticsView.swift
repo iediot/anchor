@@ -6,6 +6,7 @@ struct DiagnosticsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                header
                 permissionSection
                 Divider()
                 targetSection
@@ -16,11 +17,24 @@ struct DiagnosticsView: View {
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
+            // enabled on the whole tree so every result line can be selected and copied by hand
+            .textSelection(.enabled)
         }
         .frame(minWidth: 640, minHeight: 520)
         .task {
             model.refreshPermissions()
             await model.refreshAutomationStatus()
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 10) {
+            Text("Anchor diagnostics").font(.title3).bold()
+            Spacer()
+            if model.copiedAt != nil {
+                Text("Copied").font(.caption).foregroundStyle(.secondary)
+            }
+            Button("Copy Diagnostics") { model.copyReport() }
         }
     }
 
@@ -61,7 +75,7 @@ struct DiagnosticsView: View {
             if let scan = model.scan {
                 let target = scan.target
                 LabeledContent("Display", value: "\(target.name)\(target.isPrimary ? " (primary)" : "")")
-                LabeledContent("Chosen because", value: target.source.rawValue)
+                LabeledContent("Chosen because", value: target.originDescription)
                 if let decidedBy = target.decidedBy {
                     LabeledContent("Decided by", value: decidedBy)
                 }
@@ -69,6 +83,12 @@ struct DiagnosticsView: View {
                 LabeledContent("Usable frame", value: ScreenGeometry.describe(target.visibleFrame))
                 LabeledContent("Backing scale", value: String(format: "%.1fx", target.backingScale))
                 LabeledContent("Displays attached", value: "\(NSScreen.screens.count)")
+                LabeledContent("Scanned at", value: ProbeEvidence.stamp(scan.capturedAt))
+                if scan.lostPinnedDisplay {
+                    Text("The display selected earlier is no longer attached, so the destination was resolved again.")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                }
             } else {
                 Text("No inspection has been run yet.").foregroundStyle(.secondary)
             }
@@ -111,6 +131,11 @@ struct DiagnosticsView: View {
             Text("id \(window.id) · title via \(window.titleSource.rawValue) · \(ScreenGeometry.describe(window.appKitFrame)) · \(window.screenName ?? "unknown display")")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let path = window.documentPath {
+                Text("accessibility document \(path)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text("\(window.availability.label) · \(window.fullScreen.rawValue) · \(window.scopeReason)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -146,12 +171,18 @@ struct DiagnosticsView: View {
                 .disabled(!app.isInstalled || !app.isRunning || model.busy.contains(app.kind))
             }
             if let result = model.probes[app.kind] {
-                Text(result.summary).font(.callout)
+                Text(result.succeeded ? result.summary : "failed: \(result.summary)")
+                    .font(.callout)
+                    .foregroundStyle(result.succeeded ? Color.primary : Color.orange)
+                if let evidence = result.evidence {
+                    ForEach(Array(evidence.lines.enumerated()), id: \.offset) { _, line in
+                        Text(line).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 ForEach(result.rows) { row in
                     Text("\(row.label): \(row.detail)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
                 }
                 ForEach(Array(result.notes.enumerated()), id: \.offset) { _, note in
                     Text("note: \(note)").font(.caption).foregroundStyle(.secondary)

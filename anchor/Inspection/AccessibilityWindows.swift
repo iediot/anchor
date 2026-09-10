@@ -7,6 +7,7 @@ struct AXWindowFacts {
     let frame: CGRect?
     let isFullScreen: Bool?
     let isMinimized: Bool?
+    let documentPath: String?
 }
 
 // accessibility gives fullscreen and subrole facts the window server list does not carry
@@ -36,7 +37,16 @@ enum AccessibilityWindows {
                       subrole: string(element, kAXSubroleAttribute),
                       frame: frame(element),
                       isFullScreen: bool(element, "AXFullScreen"),
-                      isMinimized: bool(element, kAXMinimizedAttribute))
+                      isMinimized: bool(element, kAXMinimizedAttribute),
+                      documentPath: documentPath(element))
+    }
+
+    // a document window advertises its own file, which needs accessibility only
+    // and never an apple event or a recent documents list
+    nonisolated private static func documentPath(_ element: AXUIElement) -> String? {
+        guard let raw = string(element, kAXDocumentAttribute) else { return nil }
+        if let url = URL(string: raw), url.isFileURL { return url.path }
+        return raw.isEmpty ? nil : raw
     }
 
     nonisolated private static func frame(_ element: AXUIElement) -> CGRect? {

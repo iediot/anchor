@@ -1,13 +1,37 @@
+import CoreServices
 import Foundation
+
+// an apple event reply as a tree, so nothing has to be squeezed through a delimiter
+// a url or a title may hold any character including the separators anchor once used
+nonisolated indirect enum ScriptValue: Sendable {
+    case text(String)
+    case list([ScriptValue])
+
+    var text: String? {
+        if case .text(let value) = self { return value }
+        return nil
+    }
+
+    var items: [ScriptValue] {
+        if case .list(let values) = self { return values }
+        return []
+    }
+
+    // one level of a list read as plain strings, a nested list collapses to empty
+    var strings: [String] {
+        items.map { $0.text ?? "" }
+    }
+}
 
 enum ScriptOutcome {
     case text(String)
+    case value(ScriptValue)
     case failed(code: Int, message: String)
     case timedOut(TimeInterval)
 
     var failureDescription: String? {
         switch self {
-        case .text: return nil
+        case .text, .value: return nil
         case .failed(let code, let message): return "script error \(code): \(message)"
         case .timedOut(let seconds): return "timed out after \(Int(seconds))s"
         }
@@ -60,6 +84,46 @@ final class ScriptRunner: @unchecked Sendable {
                 box.finish(.timedOut(timeout))
             }
         }
+    }
+
+    // same queue and same timeout, the reply is converted to a value tree before it
+    // leaves the queue because an apple event descriptor is not sendable
+    nonisolated func runStructured(_ source: String, timeout: TimeInterval = 8) async -> ScriptOutcome {
+        await withCheckedContinuation { continuation in
+            let box = OnceBox(continuation)
+            queue.async {
+                guard let script = NSAppleScript(source: source) else {
+                    box.finish(.failed(code: -1, message: "could not compile capture script"))
+                    return
+                }
+                var error: NSDictionary?
+                let reply = script.executeAndReturnError(&error)
+                if let error {
+                    let code = (error[NSAppleScript.errorNumber] as? Int) ?? -1
+                    let message = (error[NSAppleScript.errorMessage] as? String) ?? "unknown script error"
+                    box.finish(.failed(code: code, message: message))
+                } else {
+                    box.finish(.value(Self.value(from: reply)))
+                }
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                box.finish(.timedOut(timeout))
+            }
+        }
+    }
+
+    nonisolated static func value(from descriptor: NSAppleEventDescriptor) -> ScriptValue {
+        guard descriptor.descriptorType == typeAEList else {
+            return .text(descriptor.stringValue ?? "")
+        }
+        let count = descriptor.numberOfItems
+        guard count > 0 else { return .list([]) }
+        var items: [ScriptValue] = []
+        for index in 1...count {
+            guard let item = descriptor.atIndex(index) else { continue }
+            items.append(value(from: item))
+        }
+        return .list(items)
     }
 
     // permission checks block, so they share the same off-main queue

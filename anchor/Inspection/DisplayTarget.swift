@@ -16,8 +16,31 @@ struct DisplayTarget {
     let backingScale: CGFloat
     let source: Source
     let decidedBy: String?
+    let pinnedFrom: Date?
 
     var isPrimary: Bool { screen === NSScreen.screens.first }
+
+    var originDescription: String {
+        guard let pinnedFrom else { return source.rawValue }
+        return "\(source.rawValue), kept from the selection made at \(ProbeEvidence.stamp(pinnedFrom))"
+    }
+
+    // a rescan taken for a probe must not let anchor's own focus redefine the destination
+    // the screen is looked up again by display id so a changed layout is noticed
+    static func repin(_ previous: DisplayTarget, at date: Date) -> DisplayTarget? {
+        guard let displayID = previous.displayID,
+              let screen = NSScreen.screens.first(where: { ScreenGeometry.displayID(of: $0) == displayID })
+        else { return nil }
+        return DisplayTarget(screen: screen,
+                             displayID: displayID,
+                             name: screen.localizedName,
+                             frame: screen.frame,
+                             visibleFrame: screen.visibleFrame,
+                             backingScale: screen.backingScaleFactor,
+                             source: previous.source,
+                             decidedBy: previous.decidedBy,
+                             pinnedFrom: previous.pinnedFrom ?? date)
+    }
 
     // menu interaction must never pick anchor's own display, so self owned windows are already gone
     static func resolve(from candidates: [WindowCandidate], preferredOwner: pid_t?) -> DisplayTarget {
@@ -50,6 +73,7 @@ struct DisplayTarget {
                       visibleFrame: screen.visibleFrame,
                       backingScale: screen.backingScaleFactor,
                       source: source,
-                      decidedBy: decidedBy)
+                      decidedBy: decidedBy,
+                      pinnedFrom: nil)
     }
 }
