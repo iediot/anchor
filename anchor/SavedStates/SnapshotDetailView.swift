@@ -1,157 +1,152 @@
 import SwiftUI
 
-// compact detail for one saved state
-// there is no restore control here, restoration does not exist yet and must not be implied
+// one saved state inside the panel
+// reopening is never started from here, it goes through the preview first
 struct SnapshotDetailView: View {
     let snapshot: Snapshot
     @Bindable var model: SavedStatesModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             heading
-            Divider()
-            displaySection
-            if !snapshot.issues.isEmpty {
-                Divider()
-                issuesSection
+            Button {
+                model.requestPreview(for: snapshot.id)
+            } label: {
+                Label(model.planning ? "Reading…" : "Preview Reopening", systemImage: "eye")
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
-            Divider()
-            windowsSection
-            if !snapshot.adapters.isEmpty {
-                Divider()
-                adapterSection
-            }
-            Divider()
-            Text("Anchor cannot reopen a saved state yet. This build captures and browses snapshots only, so nothing here can be restored, replaced or closed.")
-                .font(.callout)
+            .disabled(model.busy)
+            Text("The preview reads saved records and local paths only. Nothing is opened until you confirm it there.")
+                .font(.caption2)
                 .foregroundStyle(.secondary)
+
+            Divider()
+            display
+            if !snapshot.issues.isEmpty {
+                DisclosureGroup("Capture notes (\(snapshot.issues.count))") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(snapshot.issues) { issue in
+                            Text("\(issue.scope): \(issue.message)")
+                                .font(.caption)
+                                .foregroundStyle(issue.severity == .note ? Color.secondary : Color.orange)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.callout)
+            }
+            Divider()
+            windows
+            if !snapshot.adapters.isEmpty {
+                DisclosureGroup("Adapters (\(snapshot.adapters.count))") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(snapshot.adapters) { run in
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(run.app): \(run.outcome), \(String(format: "%.2fs", run.duration))")
+                                Text("matching basis: \(run.matchingBasis ?? "not recorded")")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .font(.caption)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .font(.callout)
+            }
         }
+        .textSelection(.enabled)
     }
 
     private var heading: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(SavedStatesFormat.date(snapshot.createdAt)).font(.title3).bold()
-            HStack {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(SavedStatesFormat.date(snapshot.createdAt)).font(.headline)
+            HStack(spacing: 6) {
                 TextField("Optional name", text: $model.draftName)
                     .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 280)
-                Button("Save Name") { model.renameSelected() }
+                Button("Save") { model.renameSelected() }
             }
             if let error = model.renameError {
                 Text(error).font(.caption).foregroundStyle(.orange)
             }
             Label(snapshot.completeness.label,
                   systemImage: snapshot.completeness == .complete ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.caption)
                 .foregroundStyle(snapshot.completeness == .complete ? .green : .orange)
             Text("\(snapshot.windows.count) windows, \(snapshot.capturedResourceCount) with captured resources, \(snapshot.omittedResourceCount) with omissions")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Text("schema version \(snapshot.schemaVersion) · \(snapshot.host.operatingSystem) · anchor \(snapshot.host.anchorVersion)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
-    private var displaySection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Display").font(.headline)
-            LabeledContent("Display", value: "\(snapshot.display.name)\(snapshot.display.isPrimary ? " (primary)" : "")")
-            LabeledContent("Chosen because", value: snapshot.display.selectionSource)
-            if let detail = snapshot.display.selectionDetail {
-                LabeledContent("Decided by", value: detail)
-            }
-            LabeledContent("Frame", value: snapshot.display.frame.summary)
-            LabeledContent("Usable frame", value: snapshot.display.visibleFrame.summary)
-            LabeledContent("Backing scale", value: String(format: "%.1fx", snapshot.display.backingScale))
-            LabeledContent("Displays attached", value: "\(snapshot.display.attachedDisplays)")
+    private var display: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Saved on \(snapshot.display.name)\(snapshot.display.isPrimary ? " (primary)" : "")").font(.callout)
+            Text("chosen because: \(snapshot.display.selectionSource)")
+            Text("frame \(snapshot.display.frame.summary) · usable \(snapshot.display.visibleFrame.summary)")
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
-    private var issuesSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Capture notes").font(.headline)
-            ForEach(snapshot.issues) { issue in
-                Text("\(issue.scope): \(issue.message)")
-                    .font(.callout)
-                    .foregroundStyle(issue.severity == .note ? Color.secondary : Color.orange)
-            }
-        }
-    }
-
-    private var windowsSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Windows").font(.headline)
+    private var windows: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Windows").font(.callout).bold()
             ForEach(snapshot.windows) { window in
-                windowRow(window)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 5) {
+                        Image(systemName: window.resources.status.isOmission ? "macwindow.badge.minus" : "macwindow")
+                        Text(window.appName).bold()
+                        Text(window.title ?? "no title").foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    .font(.callout)
+                    Text("\(window.resources.kind.label) · \(window.resources.status.label)")
+                        .font(.caption)
+                        .foregroundStyle(window.resources.status.isOmission ? Color.orange : Color.secondary)
+                    Text("frame \(window.appKitFrame.summary) · \(window.fullScreenSignal)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    resourceSummary(window.resources)
+                    ForEach(Array(window.limitations.enumerated()), id: \.offset) { _, note in
+                        Text("limitation: \(note)").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
             }
         }
-    }
-
-    private func windowRow(_ window: WindowRecord) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                Image(systemName: window.resources.status.isOmission ? "macwindow.badge.minus" : "macwindow")
-                Text(window.appName).bold()
-                Text(window.title ?? "no title available").foregroundStyle(.secondary).lineLimit(1)
-            }
-            Text("\(window.resources.kind.label) · \(window.resources.status.label)")
-                .font(.caption)
-                .foregroundStyle(window.resources.status.isOmission ? Color.orange : Color.secondary)
-            Text("frame \(window.appKitFrame.summary) · relative to display \(window.displayRelativeFrame.summary) · \(window.fullScreenSignal)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            resourceDetail(window.resources)
-            ForEach(Array(window.limitations.enumerated()), id: \.offset) { _, note in
-                Text("limitation: \(note)").font(.caption).foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 4)
     }
 
     @ViewBuilder
-    private func resourceDetail(_ resources: WindowResources) -> some View {
+    private func resourceSummary(_ resources: WindowResources) -> some View {
         if let browser = resources.browser {
-            ForEach(Array(browser.tabs.enumerated()), id: \.offset) { _, tab in
-                Text("tab \(tab.index)\(tab.index == browser.selectedTabIndex ? " (selected)" : ""): \(tab.title ?? "no title") — \(tab.url ?? tab.issue ?? "no address")")
-                    .font(.caption)
-                    .foregroundStyle(tab.issue == nil ? Color.secondary : Color.orange)
+            DisclosureGroup("\(browser.tabs.count) tabs") {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(browser.tabs.enumerated()), id: \.offset) { _, tab in
+                        Text("\(tab.index)\(tab.index == browser.selectedTabIndex ? " (selected)" : ""): \(tab.title ?? "no title") — \(tab.url ?? tab.issue ?? "no address")")
+                            .font(.caption2)
+                            .foregroundStyle(tab.issue == nil ? Color.secondary : Color.orange)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .font(.caption)
         }
         if let terminal = resources.terminal {
             ForEach(Array(terminal.tabs.enumerated()), id: \.offset) { _, tab in
-                Text("tab \(tab.index)\(tab.selected == true ? " (selected)" : ""): \(tab.directory ?? "no directory") via \(tab.directorySource ?? tab.issue ?? "unresolved")")
-                    .font(.caption)
+                Text("session \(tab.index): \(tab.directory ?? tab.issue ?? "no directory")")
+                    .font(.caption2)
                     .foregroundStyle(tab.directory == nil ? Color.orange : Color.secondary)
             }
         }
         if let ide = resources.jetBrains {
-            Text("project: \(ide.projectPath ?? "not identified") · \(ide.matchProvenance)")
-                .font(.caption).foregroundStyle(.secondary)
-            if !ide.ambiguousCandidates.isEmpty {
-                Text("candidates: \(ide.ambiguousCandidates.joined(separator: ", "))")
-                    .font(.caption).foregroundStyle(.orange)
+            Text("project: \(ide.projectPath ?? "not identified")").font(.caption2).foregroundStyle(.secondary)
+            if !ide.editorFiles.isEmpty {
+                Text("persisted editor files: \(ide.editorFiles.count)").font(.caption2).foregroundStyle(.secondary)
             }
-            Text("editor files: \(ide.editorFiles.isEmpty ? ide.editorFileState : ide.editorFiles.joined(separator: ", "))")
-                .font(.caption).foregroundStyle(.secondary)
         }
         if let xcode = resources.xcode {
             Text("project: \(xcode.workingDocumentPath ?? xcode.workingDocumentIssue ?? "not identified")")
-                .font(.caption).foregroundStyle(.secondary)
-            Text("active file from accessibility: \(xcode.accessibilityActiveFile ?? "none")")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-    }
-
-    private var adapterSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Adapters").font(.headline)
-            ForEach(snapshot.adapters) { run in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(run.app): \(run.outcome) · \(run.windowsCaptured) of \(run.windowsAttempted) windows · \(String(format: "%.2fs", run.duration)) from \(SavedStatesFormat.date(run.startedAt))")
-                    Text("matching basis: \(run.matchingBasis ?? "not recorded")")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption2).foregroundStyle(.secondary)
+            if let file = xcode.accessibilityActiveFile {
+                Text("active file: \(file)").font(.caption2).foregroundStyle(.secondary)
             }
         }
     }

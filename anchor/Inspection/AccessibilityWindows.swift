@@ -15,12 +15,21 @@ struct AXWindowFacts {
 // so windows are paired by frame, which is why an exact frame match is required
 enum AccessibilityWindows {
     nonisolated static func windows(pid: pid_t) -> [AXWindowFacts] {
+        elements(pid: pid).map(\.facts)
+    }
+
+    // the element is needed to place a window, the facts alone cannot be moved
+    nonisolated static func elements(pid: pid_t) -> [(element: AXUIElement, facts: AXWindowFacts)] {
         let app = AXUIElementCreateApplication(pid)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let elements = value as? [AXUIElement]
         else { return [] }
-        return elements.map(facts)
+        return elements.map { ($0, facts($0)) }
+    }
+
+    nonisolated static func currentFrame(_ element: AXUIElement) -> CGRect? {
+        frame(element)
     }
 
     nonisolated static func match(_ candidates: [AXWindowFacts], toFrame frame: CGRect) -> AXWindowFacts? {
