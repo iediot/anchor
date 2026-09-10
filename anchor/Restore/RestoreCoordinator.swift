@@ -49,8 +49,14 @@ final class RestoreCoordinator {
     private(set) var startedAt: Date?
     private(set) var finishedAt: Date?
     private(set) var cancelRequested = false
+    private(set) var log = OperationLog()
 
     var isRunning: Bool { phase == .running }
+
+    // every open this run asked for, so a repeated window can be attributed
+    var launchRequests: Int { log.launchRequests }
+
+    var report: String { log.lines().joined(separator: "\n") }
 
     var summary: String {
         let opened = reports.filter { $0.state == .opened || $0.state == .reused }.count
@@ -69,12 +75,15 @@ final class RestoreCoordinator {
         cancelRequested = true
     }
 
-    func run(plan: RestorePlan, executor: RestoreExecutor) async {
+    func run(plan: RestorePlan, executor: RestoreExecutor, operationID: String? = nil, trigger: String? = nil) async {
         guard phase != .running else { return }
-        prepare(plan)
+        let groups = RestoreExecutionOrder.ordered(plan.groups)
+        log.begin(id: operationID ?? OperationID.make(), trigger: trigger)
+        log.record("reopen", "\(plan.actionableWindowCount) windows to open on \(plan.destination.name)")
+        prepare(plan, groups: groups)
         phase = .running
 
-        outer: for group in plan.groups {
+        outer: for group in groups {
             let actionable = group.windows.filter(\.isActionable)
             guard !actionable.isEmpty else { continue }
             if cancelRequested { break }
@@ -99,13 +108,14 @@ final class RestoreCoordinator {
         conclude()
     }
 
-    private func prepare(_ plan: RestorePlan) {
+    private func prepare(_ plan: RestorePlan, groups: [RestoreGroup]) {
         cancelRequested = false
         planID = plan.id
         snapshotName = plan.snapshotName
         startedAt = Date()
         finishedAt = nil
-        reports = plan.actionableWindows.map { window in
+        // the report list is built in execution order so reading it top down is what happens
+        reports = groups.flatMap(\.windows).filter(\.isActionable).map { window in
             WindowReport(id: window.id,
                          appName: window.appName,
                          title: window.title,
@@ -124,6 +134,7 @@ final class RestoreCoordinator {
     }
 
     private func conclude() {
+        log.record("reopen finished", summary)
         for index in reports.indices where reports[index].state == .pending || reports[index].state == .running {
             reports[index].state = .cancelled
             reports[index].summary = "not started, you cancelled before anchor reached it. windows already opened stay open"
@@ -177,10 +188,20 @@ final class RestoreCoordinator {
         }
 
         let outcome: ExecutionOutcome
+        // one open per window of one confirmed run, counted where it is issued
         switch window.action {
-        case .openBrowserWindow(let request): outcome = await executor.openBrowserWindow(request)
-        case .openTerminalSession(let request): outcome = await executor.openTerminalSession(request)
-        case .openProject(let request): outcome = await executor.openProject(request)
+        case .openBrowserWindow(let request):
+            log.countLaunch()
+            log.record("open", "\(window.appName) window, request \(log.launchRequests)")
+            outcome = await executor.openBrowserWindow(request)
+        case .openTerminalSession(let request):
+            log.countLaunch()
+            log.record("open", "\(window.appName) window, request \(log.launchRequests)")
+            outcome = await executor.openTerminalSession(request)
+        case .openProject(let request):
+            log.countLaunch()
+            log.record("open", "\(request.projectName) in \(window.appName), request \(log.launchRequests)")
+            outcome = await executor.openProject(request)
         case .nothing(let reason):
             finish(window.id, state: .skipped, summary: reason, items: plannedItems(window, state: .skipped, detail: reason))
             return
@@ -245,43 +266,11 @@ final class RestoreCoordinator {
             record(placement: outcome.label, on: window.id, state: .failed)
             return
         }
-        let settled = await settle(windowID: windowID,
-                                   bundleID: window.bundleID ?? "",
-                                   requested: frame,
-                                   executor: executor)
+        let settled = await PlacementSettle.verify(windowID: windowID,
+                                                   bundleID: window.bundleID ?? "",
+                                                   requested: frame,
+                                                   executor: executor)
         record(placement: settled.text, on: window.id, state: settled.state)
-    }
-
-    // an application can accept a rectangle and then move the window itself while it is
-    // still starting, so the result is read again once and corrected at most once
-    private func settle(windowID: CGWindowID,
-                        bundleID: String,
-                        requested: CGRect,
-                        executor: RestoreExecutor) async -> (text: String, state: ItemOutcome.State) {
-        let asked = RectRecord(requested).summary
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
-        guard let first = frame(of: windowID, bundleID: bundleID, executor: executor) else {
-            return ("requested \(asked), the application accepted it, and anchor could not read the window back to confirm where it ended up", .opened)
-        }
-        guard let drift = LayoutMapping.describeAdjustment(requested: requested, actual: first) else {
-            return ("requested \(asked) and the application kept it", .opened)
-        }
-        let again = await executor.place(windowID: windowID, appKitFrame: requested)
-        guard case .applied = again else {
-            return ("requested \(asked), \(drift), and a second attempt was refused: \(again.label)", .failed)
-        }
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
-        guard let second = frame(of: windowID, bundleID: bundleID, executor: executor) else {
-            return ("requested \(asked), \(drift), and the window stopped being listed before anchor could confirm the correction", .opened)
-        }
-        guard let stillDrifting = LayoutMapping.describeAdjustment(requested: requested, actual: second) else {
-            return ("requested \(asked), the application moved it once while it was starting and anchor put it back", .opened)
-        }
-        return ("requested \(asked), \(stillDrifting), and anchor left it there rather than fighting the application", .failed)
-    }
-
-    private func frame(of windowID: CGWindowID, bundleID: String, executor: RestoreExecutor) -> CGRect? {
-        executor.liveWindows(bundleID: bundleID).first { $0.id == windowID }?.appKitFrame
     }
 
     private func plannedItems(_ window: RestorePlanWindow,

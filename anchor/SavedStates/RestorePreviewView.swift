@@ -30,6 +30,8 @@ struct RestorePreviewView: View {
                         ForEach(plan.groups) { group in
                             groupView(group)
                         }
+                        Divider()
+                        OutgoingScopeView(model: model)
                     }
                     .padding(14)
                     .textSelection(.enabled)
@@ -95,6 +97,13 @@ struct RestorePreviewView: View {
                     HStack(spacing: 5) {
                         Image(systemName: window.isActionable ? "macwindow.badge.plus" : "macwindow.badge.minus")
                         Text(window.title ?? window.appName).lineLimit(1)
+                        Spacer()
+                        if window.isActionable {
+                            Toggle("Leave out", isOn: leaveOut(window))
+                                .toggleStyle(.checkbox)
+                                .font(.caption2)
+                                .disabled(model.busy)
+                        }
                     }
                     .font(.caption)
                     Text(window.action.summary)
@@ -133,24 +142,14 @@ struct RestorePreviewView: View {
         .padding(.leading, 6)
     }
 
+    // leaving a window out changes this operation only, never the saved state
+    private func leaveOut(_ window: RestorePlanWindow) -> Binding<Bool> {
+        Binding(get: { model.replacement.excludedIncoming.contains(window.id) },
+                set: { model.replacement.exclude(incoming: window.id, $0) })
+    }
+
     private func actions(_ plan: RestorePlan) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(RestorePlanner.developmentNote)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            HStack {
-                Button("Back") { model.show(.detail(plan.snapshotID)) }
-                Spacer()
-                Button {
-                    model.requestExecute()
-                } label: {
-                    Text("Reopen Without Closing Current Windows")
-                }
-                .keyboardShortcut(.defaultAction)
-                .disabled(model.busy || plan.actionableWindowCount == 0)
-            }
-        }
-        .padding(14)
+        ReplacementConfirmView(model: model, plan: plan)
     }
 }
 
@@ -163,32 +162,19 @@ struct RestoreProgressView: View {
             PanelScroll(maxHeight: PanelMetrics.viewport(reserving: 200)) {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.headline)
-                        Text(model.restore.summary).font(.caption).foregroundStyle(.secondary)
-                    }
-                    ForEach(model.restore.reports) { report in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 5) {
-                                Image(systemName: icon(report.state))
-                                    .foregroundStyle(tint(report.state))
-                                Text(report.title ?? report.appName).font(.callout).lineLimit(1)
-                                Text(report.state.rawValue).font(.caption2).foregroundStyle(.secondary)
-                            }
-                            Text(report.summary).font(.caption2).foregroundStyle(.secondary)
-                            if let evidence = report.evidence {
-                                Text(evidence).font(.caption2).foregroundStyle(.secondary)
-                            }
-                            if let placement = report.placement {
-                                Text("layout: \(placement)").font(.caption2).foregroundStyle(.secondary)
-                            }
-                            ForEach(report.items) { item in
-                                Text("\(item.kind.label): \(item.title) — \(item.state.rawValue)\(item.detail.map { ", \($0)" } ?? "")")
-                                    .font(.caption2)
-                                    .foregroundStyle(item.state == .failed ? Color.orange : Color.secondary)
-                                    .padding(.leading, 8)
-                            }
+                        HStack {
+                            Text(title).font(.headline)
+                            Spacer()
+                            Button("Copy Report") { copy(model.restore.report) }
+                                .buttonStyle(.link)
+                                .font(.caption)
                         }
+                        Text(model.restore.summary).font(.caption).foregroundStyle(.secondary)
+                        Text("operation \(model.restore.log.id) · launch requests \(model.restore.launchRequests)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
+                    RestoreReportList(restore: model.restore)
                 }
                 .padding(14)
                 .textSelection(.enabled)
@@ -218,6 +204,38 @@ struct RestoreProgressView: View {
         case .running: return "Reopening \(model.restore.snapshotName ?? "the saved state")"
         case .finished: return "Finished"
         case .cancelled: return "Cancelled"
+        }
+    }
+
+}
+
+// one line per window of a run, shared by the development reopen and by a replacement
+struct RestoreReportList: View {
+    let restore: RestoreCoordinator
+
+    var body: some View {
+        ForEach(restore.reports) { report in
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Image(systemName: icon(report.state))
+                        .foregroundStyle(tint(report.state))
+                    Text(report.title ?? report.appName).font(.callout).lineLimit(1)
+                    Text(report.state.rawValue).font(.caption2).foregroundStyle(.secondary)
+                }
+                Text(report.summary).font(.caption2).foregroundStyle(.secondary)
+                if let evidence = report.evidence {
+                    Text(evidence).font(.caption2).foregroundStyle(.secondary)
+                }
+                if let placement = report.placement {
+                    Text("layout: \(placement)").font(.caption2).foregroundStyle(.secondary)
+                }
+                ForEach(report.items) { item in
+                    Text("\(item.kind.label): \(item.title) — \(item.state.rawValue)\(item.detail.map { ", \($0)" } ?? "")")
+                        .font(.caption2)
+                        .foregroundStyle(item.state == .failed ? Color.orange : Color.secondary)
+                        .padding(.leading, 8)
+                }
+            }
         }
     }
 

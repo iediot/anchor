@@ -4,14 +4,14 @@ import AppKit
 // preflight is read only, nothing here launches an app, opens a window, touches a project
 // or asks the network whether a saved address still resolves
 enum RestorePlanner {
-    static let developmentNote = "this is a development stage action, it opens saved resources and closes nothing, so it can leave you with more windows than you started with"
+    static let previewNote = "this preview is the confirmation. nothing is closed or opened until you choose one of the actions at the end of it"
 
     static func build(snapshot: Snapshot,
                       destination: DestinationDisplay,
                       environment: RestoreEnvironment) -> RestorePlan {
         var notes: [PlanNote] = []
-        notes.append(PlanNote(.note, developmentNote))
-        notes.append(PlanNote(.note, "nothing has been opened yet, this preview reads saved records, local paths and installed applications only"))
+        notes.append(PlanNote(.note, RestorePlanner.previewNote))
+        notes.append(PlanNote(.note, "nothing has been opened, closed or saved yet, this preview reads saved records, local paths and installed applications only"))
 
         if snapshot.completeness != .complete {
             notes.append(PlanNote(.limitation, "the saved state itself is a \(SavedStatesFormat.completeness(snapshot.completeness)), so it describes less than the screen held. a complete record is still not a promise that reopening succeeds"))
@@ -61,10 +61,20 @@ enum RestorePlanner {
                                        windows: windows))
         }
 
+        if groups.contains(where: { KnownIssues.affectsPyCharm(bundleID: $0.bundleID) }) {
+            notes.append(PlanNote(.limitation, KnownIssues.pycharm))
+        }
+
         for group in groups where group.needsAutomation {
             if let bundleID = group.bundleID, environment.automationStatus(of: bundleID) == .undetermined {
                 notes.append(PlanNote(.note, "anchor will ask for permission to control \(group.appName) when you confirm, and will report the affected items if you refuse"))
             }
+        }
+
+        // the preview lists what happens in the order it will happen
+        let ordered = RestoreExecutionOrder.ordered(groups)
+        if ordered.count > 1 {
+            notes.append(PlanNote(.note, RestoreExecutionOrder.note))
         }
 
         let automationDetail = Dictionary(uniqueKeysWithValues: groups.compactMap { group -> (String, String)? in
@@ -79,7 +89,7 @@ enum RestorePlanner {
                            completeness: snapshot.completeness,
                            source: snapshot.display,
                            destination: destination,
-                           groups: groups,
+                           groups: ordered,
                            notes: notes,
                            permissions: PlanPermissions(accessibilityGranted: environment.accessibilityGranted,
                                                         automation: automationDetail),
@@ -185,7 +195,7 @@ enum RestorePlanner {
             return Blocked(status: .permissionNeeded(detail), summary: detail)
         }
         if resources.status == .capturedEmpty {
-            let detail = "the adapter ran and \(integration.displayName) reported nothing to reopen for this window"
+            let detail = resources.detail ?? "the adapter ran and \(integration.displayName) reported nothing to reopen for this window"
             return Blocked(status: .omittedAtCapture(detail), summary: detail)
         }
         return nil
@@ -391,6 +401,14 @@ enum RestorePlanner {
         let projectID = "\(record.id).project"
         var action = RestoreAction.nothing("no project was identified for this window")
         var limitations: [String] = []
+
+        // an older snapshot can hold a project matched from a welcome window title, so the
+        // saved record is judged again here rather than trusted
+        if let reason = JetBrainsWindowTitle.role(record: record).welcomeReason {
+            let detail = "\(reason). anchor will not open a project for it, and reopening this saved state leaves the ide alone"
+            items.append(item(projectID, .project, resource.projectPath, .unsupported(detail)))
+            return Built(action: .nothing(detail), items: items, limitations: [])
+        }
 
         if resource.projectPath == nil, !resource.ambiguousCandidates.isEmpty {
             let detail = "\(resource.ambiguousCandidates.count) recent projects share this window's name, so none was saved as its project"

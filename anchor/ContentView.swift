@@ -9,12 +9,13 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var model: DiagnosticsModel
+    @Bindable var savedStates: SavedStatesModel
 
     var body: some View {
-        DiagnosticsView(model: model)
+        DiagnosticsView(model: model, savedStates: savedStates)
     }
 }
 
 #Preview {
-    ContentView(model: DiagnosticsModel())
+    ContentView(model: DiagnosticsModel(), savedStates: SavedStatesModel())
 }

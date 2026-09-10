@@ -17,8 +17,11 @@ enum ProjectWindowIdentity {
             guard path == request.path else { return nil }
             return "the window advertises \(path) as its own document"
         case .pycharm, .clion:
-            guard let title = window.title,
-                  JetBrainsProbe.leadingSegment(title).caseInsensitiveCompare(request.projectName) == .orderedSame
+            guard let title = window.title else { return nil }
+            // the welcome window can carry a real project name in its leading segment, so
+            // it is never the project window and is never moved
+            guard !JetBrainsWindowTitle.role(title: title, kind: request.app).isWelcome else { return nil }
+            guard JetBrainsProbe.leadingSegment(title).caseInsensitiveCompare(request.projectName) == .orderedSame
             else { return nil }
             return "the window title starts with \(request.projectName), which is the same heuristic the capture side uses and is not proof"
         case .safari, .chrome, .terminal, .iTerm:

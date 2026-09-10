@@ -34,8 +34,28 @@ enum JetBrainsCapture {
                 continue
             }
 
-            let hits = JetBrainsProbe.candidates(title: title, among: entries)
             let fileHint = trailingSegment(title)
+            // the welcome window is checked before the recent projects file, because its
+            // leading segment can be the name of a real recent project
+            if let reason = JetBrainsWindowTitle.role(title: title, kind: kind).welcomeReason {
+                let resource = JetBrainsResource(projectPath: nil,
+                                                 matchProvenance: "no recent project was matched, this is the ide's welcome window",
+                                                 ambiguousCandidates: [],
+                                                 titleFileHint: fileHint,
+                                                 workspaceFile: nil,
+                                                 editorFiles: [],
+                                                 editorFileState: "not read, this window holds no project")
+                output.resources[window.id] = WindowResources(kind: .jetBrains,
+                                                              status: .capturedEmpty,
+                                                              detail: "\(reason), so anchor stored its geometry and no project",
+                                                              jetBrains: resource)
+                output.issues.append(CaptureIssue(severity: .note,
+                                                  scope: kind.displayName,
+                                                  message: "one window was the ide's welcome window, so no project was recorded for it"))
+                continue
+            }
+
+            let hits = JetBrainsProbe.candidates(title: title, among: entries)
             if hits.count != 1 {
                 let detail = hits.isEmpty
                     ? "no recent project matched the leading segment of this window title"

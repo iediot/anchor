@@ -115,6 +115,22 @@ enum RestoreFixtures {
                  issues: [])
     }
 
+    // the same plan with its groups in a different order, for proving that execution
+    // order comes from the coordinator and not from the order a plan happens to carry
+    static func reordered(_ plan: RestorePlan, groups: [RestoreGroup]) -> RestorePlan {
+        RestorePlan(id: plan.id,
+                    snapshotID: plan.snapshotID,
+                    snapshotName: plan.snapshotName,
+                    snapshotCreatedAt: plan.snapshotCreatedAt,
+                    completeness: plan.completeness,
+                    source: plan.source,
+                    destination: plan.destination,
+                    groups: groups,
+                    notes: plan.notes,
+                    permissions: plan.permissions,
+                    builtAt: plan.builtAt)
+    }
+
     static func liveWindow(id: CGWindowID,
                            pid: pid_t = 501,
                            title: String? = nil,
@@ -190,6 +206,10 @@ final class RecordingExecutor: RestoreExecutor {
                          items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
     }
     var observation: WindowEvidence = .observed(902)
+    // counted rather than recorded as a call, so existing call assertions keep their shape
+    private(set) var liveWindowQueries = 0
+    // a slow ide, for proving a quick window does not wait behind one
+    var projectDelay: TimeInterval = 0
     var projectWindow: WindowEvidence = .observed(902)
     // live windows may differ per call, which is what a starting ide looks like
     var liveRounds: [String: [[LiveWindow]]] = [:]
@@ -204,6 +224,7 @@ final class RecordingExecutor: RestoreExecutor {
     }
 
     func liveWindows(bundleID: String) -> [LiveWindow] {
+        liveWindowQueries += 1
         if var rounds = liveRounds[bundleID], !rounds.isEmpty {
             let next = rounds.removeFirst()
             if !rounds.isEmpty { liveRounds[bundleID] = rounds }
@@ -227,6 +248,9 @@ final class RecordingExecutor: RestoreExecutor {
     func openProject(_ request: ProjectOpenRequest) async -> ExecutionOutcome {
         calls.append(.project(request))
         onOpen?()
+        if projectDelay > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(projectDelay * 1_000_000_000))
+        }
         return projectOutcome(request)
     }
 

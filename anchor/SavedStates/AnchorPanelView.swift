@@ -33,7 +33,7 @@ struct AnchorPanelView: View {
                 .buttonStyle(.link)
             }
             Spacer()
-            if model.restore.isRunning {
+            if model.busy {
                 ProgressView().controlSize(.small)
             }
         }
@@ -69,6 +69,8 @@ struct AnchorPanelView: View {
             RestorePreviewView(model: model)
         case .operation:
             RestoreProgressView(model: model)
+        case .replacement:
+            ReplacementProgressView(model: model)
         }
     }
 
@@ -89,7 +91,16 @@ struct AnchorPanelView: View {
                 if let outcome = model.lastOutcome {
                     outcomeBanner(outcome)
                 }
-                if !model.restore.reports.isEmpty {
+                if model.replacement.stage != .idle {
+                    Button {
+                        model.show(.replacement)
+                    } label: {
+                        Label(model.replacement.isRunning ? "Replacement in progress…" : "Last replacement result",
+                              systemImage: "arrow.triangle.swap")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.link)
+                } else if !model.restore.reports.isEmpty {
                     Button {
                         model.show(.operation)
                     } label: {
@@ -188,11 +199,12 @@ struct AnchorPanelView: View {
                 Spacer()
             }
             HStack {
-                Button("Diagnostics…") {
-                    openWindow(id: DiagnosticsWindow.id)
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                }
-                .buttonStyle(.link)
+                Button("Diagnostics…") { openDiagnostics() }
+                    .buttonStyle(.link)
+                // the temporary pycharm launch test lives in that window, and it was not
+                // findable from here at all
+                Button("PyCharm Launch Test…") { openDiagnostics() }
+                    .buttonStyle(.link)
                 Spacer()
                 Button("Quit Anchor") { NSApplication.shared.terminate(nil) }
                     .buttonStyle(.link)
@@ -201,6 +213,11 @@ struct AnchorPanelView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private func openDiagnostics() {
+        openWindow(id: DiagnosticsWindow.id)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
     private var disclosure: some View {

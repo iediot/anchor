@@ -262,7 +262,7 @@ final class RestorePlannerTests: XCTestCase {
         let record = RestoreFixtures.window(resources: RestoreFixtures.browser(["https://one.example"]))
         let built = plan([record], completeness: .partial)
         XCTAssertTrue(built.notes.contains { $0.text.contains("partial capture") })
-        XCTAssertTrue(built.notes.contains { $0.text == RestorePlanner.developmentNote })
+        XCTAssertTrue(built.notes.contains { $0.text == RestorePlanner.previewNote })
     }
 
     // the plan is built from questions only, and the executor is never involved

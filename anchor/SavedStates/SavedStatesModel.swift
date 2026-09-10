@@ -8,6 +8,7 @@ enum PanelRoute: Equatable {
     case detail(String)
     case preview
     case operation
+    case replacement
 }
 
 @MainActor
@@ -23,7 +24,9 @@ final class SavedStatesModel {
     var draftName: String = ""
 
     var route: PanelRoute = .home
-    let restore = RestoreCoordinator()
+    let restore: RestoreCoordinator
+    let replacement: ReplacementCoordinator
+    let launch = LaunchDiagnosticsCoordinator()
     private(set) var plan: RestorePlan?
     private(set) var planning = false
     private(set) var planError: String?
@@ -32,10 +35,11 @@ final class SavedStatesModel {
     private var environment: LiveRestoreEnvironment?
 
     // one operation at a time, and no second press of the same button
-    var busy: Bool { saving || planning || restore.isRunning }
+    var busy: Bool { saving || planning || restore.isRunning || replacement.isRunning || launch.isRunning }
 
     // the explanation is shown once, the choice it takes becomes the standing setting
     var browserDisclosurePending = false
+    private var pendingReplacement: ReplacementCoordinator.Mode?
 
     var includeBrowserTabs: Bool {
         didSet { defaults.set(includeBrowserTabs, forKey: Keys.includeBrowserTabs) }
@@ -54,6 +58,9 @@ final class SavedStatesModel {
     private let store: SnapshotStore?
 
     init(store: SnapshotStore? = nil) {
+        let restore = RestoreCoordinator()
+        self.restore = restore
+        replacement = ReplacementCoordinator(restore: restore)
         if let store {
             self.store = store
             storeError = nil
@@ -123,7 +130,86 @@ final class SavedStatesModel {
         route = .preview
         planError = nil
         planRebuiltNotice = nil
-        plan = await buildPlan(snapshot)
+        let built = await buildPlan(snapshot)
+        plan = built
+        await replacement.beginPreflight(plan: built, services: services())
+    }
+
+    private func services() -> LiveReplacementServices {
+        LiveReplacementServices(store: store, includeBrowserTabs: includeBrowserTabs)
+    }
+
+    func requestReplacement(_ mode: ReplacementCoordinator.Mode) {
+        guard !busy, plan != nil, replacement.canConfirm else { return }
+        // saving on the way out is still a save, so the one browser question comes first
+        guard mode == .replaceWithoutSaving || browserDisclosureShown else {
+            pendingReplacement = mode
+            browserDisclosurePending = true
+            return
+        }
+        Task { await replace(mode) }
+    }
+
+    // the preview is the confirmation, and the coordinator checks the screen again itself
+    // before it saves or closes anything
+    func replace(_ mode: ReplacementCoordinator.Mode) async {
+        guard !busy,
+              let current = plan,
+              let environment,
+              let snapshot = snapshots.first(where: { $0.id == current.snapshotID })
+        else { return }
+        route = .replacement
+        await replacement.run(mode: mode,
+                              plan: current,
+                              services: services(),
+                              executor: LiveRestoreExecutor(environment: environment))
+        reload()
+        guard replacement.refreshRequired else { return }
+        planning = true
+        let rebuilt = await buildPlan(snapshot)
+        plan = rebuilt
+        await replacement.beginPreflight(plan: rebuilt, services: services())
+        planning = false
+        planRebuiltNotice = "the screen changed, so anchor stopped and read it again. check this preview and confirm once more"
+        route = .preview
+    }
+
+    // the temporary launch diagnostic, on the same gate as save, reopen and replacement
+    // so a diagnostic run and a real operation can never overlap
+    func requestLaunchDiagnostic(_ mode: LaunchDiagnosticMode, projectPath: String) {
+        guard !busy else { return }
+        Task { await runLaunchDiagnostic(mode, projectPath: projectPath) }
+    }
+
+    func runLaunchDiagnostic(_ mode: LaunchDiagnosticMode, projectPath: String) async {
+        guard !busy else { return }
+        let request = ProjectOpenRequest(app: .pycharm,
+                                         itemID: "launch-diagnostic",
+                                         path: projectPath,
+                                         projectName: (projectPath as NSString).lastPathComponent)
+        let granted = Permissions.accessibilityGranted
+        // no automation is looked up, this application is not scripted and the launch
+        // stage must touch nothing but the launch
+        let environment = LiveRestoreEnvironment(accessibilityGranted: granted, automation: [:])
+        var rectangle: LaunchRectangle?
+        if mode == .place {
+            rectangle = LaunchRectangleSource.resolve(projectPath: projectPath,
+                                                      snapshots: snapshots,
+                                                      destination: resolveDestination())
+        }
+        await launch.run(mode: mode,
+                         project: request,
+                         rectangle: rectangle,
+                         accessibilityGranted: granted,
+                         probe: LiveLaunchProcessProbe(),
+                         executor: LiveRestoreExecutor(environment: environment))
+    }
+
+    func requestPartialCaptureDecision() {
+        Task {
+            await replacement.continueAfterPartialCapture()
+            reload()
+        }
     }
 
     private func buildPlan(_ snapshot: Snapshot) async -> RestorePlan {
@@ -178,11 +264,17 @@ final class SavedStatesModel {
         browserDisclosurePending = false
         browserDisclosureShown = true
         includeBrowserTabs = include
+        if let mode = pendingReplacement {
+            pendingReplacement = nil
+            Task { await replace(mode) }
+            return
+        }
         Task { await save(includeBrowserTabs: include) }
     }
 
     func cancelDisclosure() {
         browserDisclosurePending = false
+        pendingReplacement = nil
     }
 
     func save(includeBrowserTabs include: Bool) async {

@@ -2,11 +2,14 @@ import SwiftUI
 
 struct DiagnosticsView: View {
     @Bindable var model: DiagnosticsModel
+    @Bindable var savedStates: SavedStatesModel
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
+                LaunchDiagnosticsView(model: savedStates)
+                Divider()
                 permissionSection
                 Divider()
                 targetSection
@@ -69,8 +72,10 @@ struct DiagnosticsView: View {
             HStack {
                 Text("Target display").font(.headline)
                 Spacer()
+                // inspecting reads every window, so it stays shut while an operation or a
+                // launch diagnostic is running
                 Button(model.scanning ? "Inspecting…" : "Inspect Current Screen") { model.inspect() }
-                    .disabled(model.scanning)
+                    .disabled(model.scanning || savedStates.busy)
             }
             if let scan = model.scan {
                 let target = scan.target
@@ -168,7 +173,7 @@ struct DiagnosticsView: View {
                 Button(model.busy.contains(app.kind) ? "Probing…" : "Probe") {
                     Task { await model.probe(app.kind) }
                 }
-                .disabled(!app.isInstalled || !app.isRunning || model.busy.contains(app.kind))
+                .disabled(!app.isInstalled || !app.isRunning || model.busy.contains(app.kind) || savedStates.busy)
             }
             if let result = model.probes[app.kind] {
                 Text(result.succeeded ? result.summary : "failed: \(result.summary)")

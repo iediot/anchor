@@ -260,10 +260,40 @@ struct RestorePlan: Identifiable, Equatable {
 
     var headline: String {
         guard actionableWindowCount > 0 else {
-            return "nothing in this saved state can be reopened by this build"
+            return "nothing in this saved state can be reopened onto \(destination.name), so there is nothing to replace with and anchor would close nothing"
         }
         return "\(actionableWindowCount) windows would be opened on \(destination.name), \(readyItemCount) items ready, \(blockedItemCount) not available"
     }
 
     static func == (lhs: RestorePlan, rhs: RestorePlan) -> Bool { lhs.id == rhs.id }
+}
+
+extension RestorePlan {
+    // the same plan with some windows left out of this one operation
+    // the saved state on disk is never edited by leaving something out here
+    func excluding(windowIDs excluded: Set<String>) -> RestorePlan {
+        guard !excluded.isEmpty else { return self }
+        let kept = groups.compactMap { group -> RestoreGroup? in
+            let windows = group.windows.filter { !excluded.contains($0.id) }
+            guard !windows.isEmpty else { return nil }
+            return RestoreGroup(id: group.id,
+                                appName: group.appName,
+                                bundleID: group.bundleID,
+                                kind: group.kind,
+                                appDetail: group.appDetail,
+                                windows: windows)
+        }
+        let left = windows.count - kept.reduce(0) { $0 + $1.windows.count }
+        return RestorePlan(id: id,
+                           snapshotID: snapshotID,
+                           snapshotName: snapshotName,
+                           snapshotCreatedAt: snapshotCreatedAt,
+                           completeness: completeness,
+                           source: source,
+                           destination: destination,
+                           groups: kept,
+                           notes: notes + [PlanNote(.note, "\(left) saved windows were left out of this operation. the saved state itself is unchanged")],
+                           permissions: permissions,
+                           builtAt: builtAt)
+    }
 }

@@ -32,6 +32,34 @@ enum AccessibilityWindows {
         frame(element)
     }
 
+    // one window element, only when exactly one of the app's windows sits at that rectangle
+    nonisolated static func element(pid: pid_t, matchingFrame rect: CGRect) -> AXUIElement? {
+        let hits = elements(pid: pid).filter { entry in
+            guard let other = entry.facts.frame else { return false }
+            return abs(other.minX - rect.minX) < 2 && abs(other.minY - rect.minY) < 2
+                && abs(other.width - rect.width) < 2 && abs(other.height - rect.height) < 2
+        }
+        return hits.count == 1 ? hits[0].element : nil
+    }
+
+    // the window's own close button, which is what a click on it would press
+    // there is no quit, terminate or force close here on purpose
+    nonisolated static func closeControl(_ element: AXUIElement) -> AXUIElement? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXCloseButtonAttribute as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXUIElementGetTypeID()
+        else { return nil }
+        return (raw as! AXUIElement)
+    }
+
+    nonisolated static func isEnabled(_ element: AXUIElement) -> Bool? {
+        bool(element, kAXEnabledAttribute)
+    }
+
+    nonisolated static func press(_ element: AXUIElement) -> AXError {
+        AXUIElementPerformAction(element, kAXPressAction as CFString)
+    }
+
     nonisolated static func match(_ candidates: [AXWindowFacts], toFrame frame: CGRect) -> AXWindowFacts? {
         let hits = candidates.filter { candidate in
             guard let other = candidate.frame else { return false }
