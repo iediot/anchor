@@ -17,12 +17,17 @@ enum AppIconCache {
     }
 }
 
-// a miniature of one saved arrangement, drawn from the recorded display and window
-// rectangles only, never from a screenshot
+// a miniature of one saved arrangement
+// behind it, when the save took one, sits the blurred picture of the display that was
+// saved, with the app icons over it at the window positions the record holds
+// a layout with no picture keeps the schematic, its window rectangles drawn on a plain
+// ground, which is what every older saved layout has
 struct LayoutThumbnail: View {
     let snapshot: Snapshot
     // the miniature is fitted inside this box, its own shape decides the rest
     let fit: CGSize
+    // the blurred picture of the display, already downscaled, never a sharp frame
+    var backdrop: NSImage?
 
     private var display: CGRect { snapshot.display.frame.cgRect }
 
@@ -41,15 +46,43 @@ struct LayoutThumbnail: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 4).fill(.quaternary)
-            ForEach(placements) { placement in
-                window(placement)
+            ground
+            // the window rectangles are the drawing only when there is no picture behind
+            if backdrop == nil {
+                ForEach(placements) { placement in
+                    window(placement)
+                }
+            }
+            // the icons are drawn on their own, because separating them moves them off
+            // the centres of the rectangles they belong to
+            ForEach(icons) { icon in
+                marker(icon)
             }
         }
         .frame(width: size.width, height: size.height)
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.35), lineWidth: 0.5))
-        .accessibilityLabel("miniature of the saved layout, \(snapshot.windows.count) windows")
+        .accessibilityLabel(label)
+    }
+
+    private var label: String {
+        let windows = "\(snapshot.windows.count) windows"
+        return backdrop == nil
+            ? "miniature of the saved layout, \(windows)"
+            : "blurred picture of the saved screen, \(windows)"
+    }
+
+    @ViewBuilder
+    private var ground: some View {
+        if let backdrop {
+            Image(nsImage: backdrop)
+                .resizable()
+                .interpolation(.medium)
+                .aspectRatio(contentMode: .fill)
+                .frame(width: size.width, height: size.height)
+        } else {
+            RoundedRectangle(cornerRadius: 4).fill(.quaternary)
+        }
     }
 
     private struct Placement: Identifiable {
@@ -79,32 +112,111 @@ struct LayoutThumbnail: View {
         }
     }
 
+    // the saved rectangle, drawn exactly where it was recorded
     private func window(_ placement: Placement) -> some View {
         let width = max(placement.rect.width, 4)
         let height = max(placement.rect.height, 4)
         return RoundedRectangle(cornerRadius: 2)
             .fill(Color(nsColor: .windowBackgroundColor))
             .overlay(RoundedRectangle(cornerRadius: 2).strokeBorder(Color.secondary.opacity(0.5), lineWidth: 0.5))
-            .overlay(icon(placement, side: min(width, height)))
             .frame(width: width, height: height)
             .offset(x: placement.rect.minX, y: placement.rect.minY)
     }
 
-    @ViewBuilder
-    private func icon(_ placement: Placement, side: CGFloat) -> some View {
-        // below this the rectangle is the only thing still readable
-        if side >= 8 {
-            let length = min(max(side * 0.55, 6), 26)
+    private struct IconPlacement: Identifiable {
+        let id: String
+        let bundleID: String?
+        let length: CGFloat
+        var centre: CGPoint
+    }
+
+    // an icon starts at the centre of its own window and is only moved to get clear of
+    // another icon, so a stack of windows reads as several applications rather than one
+    // nothing here touches the saved geometry, only the icon drawn over it
+    private var icons: [IconPlacement] {
+        var items = placements.compactMap { placement -> IconPlacement? in
+            let side = min(max(placement.rect.width, 4), max(placement.rect.height, 4))
+            // below this the rectangle is the only thing still readable
+            guard side >= 8 else { return nil }
+            return IconPlacement(id: placement.id,
+                                 bundleID: placement.bundleID,
+                                 length: min(max(side * 0.55, 6), 26),
+                                 centre: CGPoint(x: placement.rect.midX, y: placement.rect.midY))
+        }
+        guard items.count > 1 else { return items.map(held) }
+        // a fixed number of passes over the pairs in a fixed order, and every push is
+        // decided by the positions alone, so the same layout lays out the same way every
+        // time it is drawn
+        for _ in 0..<6 {
+            var moved = false
+            for i in items.indices {
+                for j in items.indices where j > i {
+                    var first = items[i]
+                    var second = items[j]
+                    guard separate(&first, &second) else { continue }
+                    items[i] = first
+                    items[j] = second
+                    moved = true
+                }
+            }
+            items = items.map(held)
+            if !moved { break }
+        }
+        return items
+    }
+
+    // two icons that sit on top of each other step apart along whichever axis needs the
+    // shorter move, each going half the distance in the opposite direction
+    private func separate(_ first: inout IconPlacement, _ second: inout IconPlacement) -> Bool {
+        let gap: CGFloat = 2
+        let clearance = (first.length + second.length) / 2 + gap
+        let dx = second.centre.x - first.centre.x
+        let dy = second.centre.y - first.centre.y
+        let overlapX = clearance - abs(dx)
+        let overlapY = clearance - abs(dy)
+        guard overlapX > 0, overlapY > 0 else { return false }
+        if overlapX <= overlapY {
+            // two icons at the very same point part along x, the earlier one leftwards
+            let direction: CGFloat = dx < 0 ? -1 : 1
+            first.centre.x -= overlapX / 2 * direction
+            second.centre.x += overlapX / 2 * direction
+        } else {
+            let direction: CGFloat = dy < 0 ? -1 : 1
+            first.centre.y -= overlapY / 2 * direction
+            second.centre.y += overlapY / 2 * direction
+        }
+        return true
+    }
+
+    // an icon pushed aside still belongs inside the miniature
+    private func held(_ placement: IconPlacement) -> IconPlacement {
+        var held = placement
+        let half = placement.length / 2
+        held.centre.x = size.width >= placement.length
+            ? min(max(placement.centre.x, half), size.width - half)
+            : size.width / 2
+        held.centre.y = size.height >= placement.length
+            ? min(max(placement.centre.y, half), size.height - half)
+            : size.height / 2
+        return held
+    }
+
+    private func marker(_ placement: IconPlacement) -> some View {
+        let length = placement.length
+        return Group {
             if let image = AppIconCache.icon(for: placement.bundleID) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
-                    .frame(width: length, height: length)
             } else {
                 Image(systemName: "macwindow")
                     .font(.system(size: length * 0.75))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(backdrop == nil ? Color.secondary : Color.white.opacity(0.9))
             }
         }
+        .frame(width: length, height: length)
+        // over a blurred picture an icon needs its own edge
+        .shadow(color: .black.opacity(backdrop == nil ? 0 : 0.35), radius: 1.5, y: 0.5)
+        .offset(x: placement.centre.x - length / 2, y: placement.centre.y - length / 2)
     }
 }

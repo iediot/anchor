@@ -51,7 +51,8 @@ struct RestorePreviewView: View {
                 if let snapshot {
                     LayoutThumbnail(snapshot: snapshot,
                                     fit: CGSize(width: PanelMetrics.contentWidth - 24,
-                                                height: PanelMetrics.detailMiddleHeight))
+                                                height: PanelMetrics.detailMiddleHeight),
+                                    backdrop: model.thumbnailImage(for: snapshot.id))
                         .frame(maxWidth: .infinity, alignment: .center)
                         .opacity(previewHidden ? 0 : 1)
                         .onGeometryChange(for: CGRect.self) { proxy in

@@ -40,11 +40,24 @@ enum RestorePlanner {
             let integration = IntegrationKind.matching(bundleID: bundleID)
             let presence = bundleID.map(environment.presence) ?? .notInstalled
             let automation = bundleID.map(environment.automationStatus) ?? .undetermined
+            // an application with no adapter is opened once for the whole group, so several
+            // saved windows of it never promise several restored windows
+            // finder is the exception: its windows are real windows, so the same folder
+            // twice is still one window and the windows with no folder share one plain one
+            let generic: [String: GenericOpen]
+            if integration == nil {
+                generic = genericOpens(records, environment: environment)
+            } else if integration == .finder {
+                generic = genericOpens(records, plainAlongsideDocuments: true, environment: environment)
+            } else {
+                generic = [:]
+            }
             let windows = records.map { record in
                 window(record,
                        integration: integration,
                        presence: presence,
                        automation: automation,
+                       generic: generic[record.id],
                        snapshot: snapshot,
                        destination: destination,
                        environment: environment)
@@ -100,9 +113,50 @@ enum RestorePlanner {
                                   automation: AutomationAccess,
                                   integration: IntegrationKind?,
                                   scripted: Bool) -> String {
-        guard integration != nil else { return "\(presence.detail), anchor has no adapter for this application" }
+        guard integration != nil else { return "\(presence.detail), no adapter, so anchor opens the application as it is" }
         guard scripted else { return "\(presence.detail), opened through the installed application itself" }
         return "\(presence.detail), automation \(automation.label)"
+    }
+
+    // what a window with no adapter does: open the application, with the item the window
+    // itself advertised when it was saved if that item is still there
+    enum GenericOpen: Equatable {
+        case application
+        case document(String)
+        // another saved window of the same application already opens it
+        case covered
+    }
+
+    // one open per application, plus one open per distinct document that still exists
+    // nothing here is guessed from a title or from a recent documents list
+    static func genericOpens(_ records: [WindowRecord],
+                             plainAlongsideDocuments: Bool = false,
+                             environment: RestoreEnvironment) -> [String: GenericOpen] {
+        var assigned: [String: GenericOpen] = [:]
+        var takenPaths: Set<String> = []
+        var withoutPath: [String] = []
+        for record in records {
+            guard let path = validDocument(record, environment: environment) else {
+                withoutPath.append(record.id)
+                continue
+            }
+            // the same document twice is still one open
+            assigned[record.id] = takenPaths.insert(path).inserted ? .document(path) : .covered
+        }
+        for (offset, id) in withoutPath.enumerated() {
+            // the application itself is opened once, and only when no document opens it
+            let plain = plainAlongsideDocuments || takenPaths.isEmpty
+            assigned[id] = offset == 0 && plain ? .application : .covered
+        }
+        return assigned
+    }
+
+    // the document the window advertised at capture, kept only while it still exists
+    private static func validDocument(_ record: WindowRecord, environment: RestoreEnvironment) -> String? {
+        guard let raw = record.resources.finder?.path ?? record.accessibilityDocument, !raw.isEmpty else { return nil }
+        let path = (raw as NSString).standardizingPath
+        guard case .present = environment.fileStatus(path) else { return nil }
+        return path
     }
 
     // one saved window becomes one intended action, one layout and its items
@@ -110,6 +164,7 @@ enum RestorePlanner {
                                integration: IntegrationKind?,
                                presence: AppPresence,
                                automation: AutomationAccess,
+                               generic: GenericOpen?,
                                snapshot: Snapshot,
                                destination: DestinationDisplay,
                                environment: RestoreEnvironment) -> RestorePlanWindow {
@@ -129,6 +184,16 @@ enum RestorePlanner {
                                          detail: nil,
                                          status: blocked.status))
             action = .nothing(blocked.summary)
+        } else if record.resources.kind == .finder || integration == .finder {
+            let built = finder(record, generic: generic, environment: environment)
+            items = built.items
+            action = built.action
+            limitations.append(contentsOf: built.limitations)
+        } else if integration == nil, let generic, let bundleID = record.bundleID {
+            let built = application(record, bundleID: bundleID, open: generic)
+            items = built.items
+            action = built.action
+            limitations.append(contentsOf: built.limitations)
         } else if let integration {
             let built = build(record: record,
                               integration: integration,
@@ -143,6 +208,10 @@ enum RestorePlanner {
             items.append(layoutItem(record: record,
                                     layout: layout,
                                     accessibilityGranted: environment.accessibilityGranted))
+        }
+        if case .openApplication = action {
+            // opening comes first, so a plain open never holds the next application up
+            limitations.append("anchor does not wait for this application's window, so this layout is applied only if the window is there at once")
         }
 
         return RestorePlanWindow(id: record.id,
@@ -167,9 +236,24 @@ enum RestorePlanner {
                                        presence: AppPresence,
                                        automation: AutomationAccess) -> Blocked? {
         let resources = record.resources
+        // no adapter is not a reason to leave an application closed. it is opened by its
+        // identifier, with a saved item when there is a usable one, and the report never
+        // calls that a restored window
         if resources.kind == .unsupported || integration == nil {
-            let detail = "anchor has no adapter for \(record.appName), so this window was saved as geometry only and anchor will not launch the application and call that a restored state"
-            return Blocked(status: .unsupported(detail), summary: detail)
+            guard record.bundleID?.isEmpty == false else {
+                let detail = "this window was saved without an application identifier, so anchor cannot tell what to open"
+                return Blocked(status: .unsupported(detail), summary: detail)
+            }
+            guard presence.installed else {
+                let detail = "\(record.appName) is not installed on this mac"
+                return Blocked(status: .appUnavailable(detail), summary: detail)
+            }
+            return nil
+        }
+        // finder always opens. a missing folder is reported on the item, it is not a reason
+        // to leave the application closed
+        if resources.kind == .finder || integration == .finder {
+            return nil
         }
         guard let integration else { return nil }
         if !presence.installed {
@@ -215,7 +299,99 @@ enum RestorePlanner {
         case .terminal: return terminal(record, integration: integration, environment: environment)
         case .xcode: return xcode(record, integration: integration, environment: environment)
         case .jetBrains: return jetBrains(record, integration: integration, environment: environment)
+        case .finder: return finder(record, generic: nil, environment: environment)
         case .unsupported: return Built(action: .nothing("no adapter"), items: [], limitations: [])
+        }
+    }
+
+    // one finder window becomes one folder, opened with finder itself
+    // a window whose folder was never captured still opens a finder window and says so,
+    // and nothing is ever taken from the window's title
+    private static func finder(_ record: WindowRecord,
+                               generic: GenericOpen?,
+                               environment: RestoreEnvironment) -> Built {
+        let id = "\(record.id).folder"
+        let bundleID = record.bundleID ?? IntegrationKind.finder.bundleID
+        if case .covered = generic {
+            let reason = "this folder is already opened for another saved window, so finder is not asked twice"
+            return Built(action: .nothing(reason),
+                         items: [RestorePlanItem(id: id,
+                                                 kind: .folder,
+                                                 title: record.appName,
+                                                 detail: nil,
+                                                 status: .omittedAtCapture(reason))],
+                         limitations: [])
+        }
+        let saved = record.resources.finder?.path ?? FinderCapture.folder(record.accessibilityDocument)
+        func plain(_ status: RestoreItemStatus, _ limitation: String) -> Built {
+            Built(action: .openApplication(AppOpenRequest(bundleID: bundleID,
+                                                          appName: record.appName,
+                                                          itemID: id,
+                                                          path: nil)),
+                  items: [RestorePlanItem(id: id,
+                                          kind: .folder,
+                                          title: record.appName,
+                                          detail: nil,
+                                          status: status)],
+                  limitations: [limitation])
+        }
+        guard let saved, !saved.isEmpty else {
+            let reason = "the folder this window was showing was not captured, so a normal finder window opens instead"
+            return plain(.readyWithLimitation(reason), reason)
+        }
+        switch ResourceValidation.decideDirectory(saved, fileStatus: environment.fileStatus) {
+        case .ready(let path):
+            return Built(action: .openApplication(AppOpenRequest(bundleID: bundleID,
+                                                                 appName: record.appName,
+                                                                 itemID: id,
+                                                                 path: path)),
+                         items: [item(id, .folder, path, .ready)],
+                         limitations: ["finder reopens this folder in a window of its own. the folder is the one the window's active tab was showing, and its other tabs, its selection, its view and its sidebar are not saved"])
+        case .missing(let reason):
+            return plain(.readyWithLimitation("\(reason), so a normal finder window opens instead"),
+                         "the saved folder is gone, so finder opens a window of its own")
+        case .inaccessible(let reason), .malformed(let reason):
+            return plain(.readyWithLimitation("\(reason), so a normal finder window opens instead"),
+                         "the saved folder cannot be used, so finder opens a window of its own")
+        }
+    }
+
+    // an application anchor has no adapter for: it is opened, and what it had open is not
+    // something anchor saved, so the report says so rather than implying a restored window
+    private static func application(_ record: WindowRecord,
+                                    bundleID: String,
+                                    open: GenericOpen) -> Built {
+        let id = "\(record.id).application"
+        switch open {
+        case .covered:
+            let reason = "\(record.appName) is opened once for this saved state, so this window is not opened a second time"
+            return Built(action: .nothing(reason),
+                         items: [RestorePlanItem(id: id,
+                                                 kind: .application,
+                                                 title: record.appName,
+                                                 detail: nil,
+                                                 status: .omittedAtCapture(reason))],
+                         limitations: [])
+        case .application:
+            let note = "anchor has no adapter for \(record.appName), so it opens the application and what the window had open is unavailable"
+            return Built(action: .openApplication(AppOpenRequest(bundleID: bundleID,
+                                                                 appName: record.appName,
+                                                                 itemID: id,
+                                                                 path: nil)),
+                         items: [RestorePlanItem(id: id,
+                                                 kind: .application,
+                                                 title: record.appName,
+                                                 detail: nil,
+                                                 status: .readyWithLimitation("the application is opened, its previous contents are unavailable"))],
+                         limitations: [note])
+        case .document(let path):
+            let note = "anchor has no adapter for \(record.appName), so it opens the item this window advertised when it was saved and nothing else about the window is restored"
+            return Built(action: .openApplication(AppOpenRequest(bundleID: bundleID,
+                                                                 appName: record.appName,
+                                                                 itemID: id,
+                                                                 path: path)),
+                         items: [item(id, .application, path, .ready)],
+                         limitations: [note])
         }
     }
 
@@ -498,6 +674,7 @@ enum RestorePlanner {
         case .browser: return .browserTab
         case .terminal: return .terminalSession
         case .jetBrains, .xcode: return .project
+        case .finder: return .folder
         case .unsupported: return .window
         }
     }

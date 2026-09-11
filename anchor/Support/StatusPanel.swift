@@ -6,13 +6,13 @@ import SwiftUI
 // ourselves: the panel hangs to the left of the icon with its reserved strip under it
 // the views, the models and the routes are the same ones the menu bar extra carried
 @MainActor
-final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
+final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let savedStates = SavedStatesModel()
-    let diagnostics = DiagnosticsModel()
+    let setup = PermissionsSetupModel()
 
     private var statusItem: NSStatusItem?
     private var panel: AnchorPanel?
-    private var diagnosticsWindow: NSWindow?
+    private var setupWindow: NSWindow?
     private var outsideClick: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,6 +36,12 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
                                                selector: #selector(applicationResigned),
                                                name: NSApplication.didResignActiveNotification,
                                                object: nil)
+
+        // the permissions are explained once, on the first launch, and after that only
+        // when the settings menu asks for them
+        if !setup.hasBeenShown {
+            showSetup()
+        }
     }
 
     @objc private func toggle() {
@@ -52,7 +58,7 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
         if !savedStates.busy {
             savedStates.reload()
             savedStates.resolveDestination()
-            diagnostics.refreshPermissions()
+            setup.refreshPermissions()
         }
         // a fresh opening of the grid starts at its newest end, anything else the panel
         // was left in keeps the place it was left at
@@ -77,6 +83,50 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
         }
     }
 
+    // the setup window is a plain window of this application, the panel only asks for it
+    // dismissing it, by continue or by its close button, is what marks onboarding done
+    func showSetup() {
+        close()
+        if setupWindow == nil {
+            let root = PermissionsSetupView(model: setup, savedStates: savedStates) { [weak self] in
+                self?.dismissSetup()
+            }
+            let controller = NSHostingController(rootView: root)
+            let window = NSWindow(contentViewController: controller)
+            window.title = "Anchor Setup"
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.setContentSize(NSSize(width: 560, height: 620))
+            window.isReleasedWhenClosed = false
+            window.setFrameAutosaveName(SetupWindow.id)
+            window.delegate = self
+            window.center()
+            setupWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        setupWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func dismissSetup() {
+        setup.markShown()
+        setupWindow?.close()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard notification.object as? NSWindow === setupWindow else { return }
+        setup.markShown()
+        // whatever was granted while it was open decides what the panel shows now
+        setup.refreshPermissions()
+    }
+
+    // one report, read from state anchor already holds and put on the pasteboard
+    // the automation answers are read again first, without prompting
+    func copyTroubleshootingReport() {
+        Task { [setup, savedStates] in
+            await setup.refresh()
+            TroubleshootingReport.copyToPasteboard(setup: setup, savedStates: savedStates)
+        }
+    }
+
     private func makePanel() -> AnchorPanel {
         let panel = AnchorPanel(contentRect: NSRect(x: 0, y: 0, width: PanelMetrics.width, height: 200),
                                 styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
@@ -91,8 +141,9 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let root = AnchorPanelView(model: savedStates, diagnostics: diagnostics)
-            .environment(\.openDiagnostics) { [weak self] in self?.showDiagnostics() }
+        let root = AnchorPanelView(model: savedStates, setup: setup)
+            .environment(\.openSetup) { [weak self] in self?.showSetup() }
+            .environment(\.copyTroubleshooting) { [weak self] in self?.copyTroubleshootingReport() }
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         let controller = NSHostingController(rootView: root)
         // the content decides the size, the placement keeps the top edge under the icon
@@ -127,25 +178,6 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate {
         outsideClick = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
         }
-    }
-
-    // the diagnostics window is a plain window of this application, the panel only asks
-    // for it, and it closes the panel the way any other click outside would
-    func showDiagnostics() {
-        close()
-        if diagnosticsWindow == nil {
-            let controller = NSHostingController(rootView: ContentView(model: diagnostics, savedStates: savedStates))
-            let window = NSWindow(contentViewController: controller)
-            window.title = "Anchor Diagnostics"
-            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.setContentSize(NSSize(width: 720, height: 620))
-            window.isReleasedWhenClosed = false
-            window.setFrameAutosaveName(DiagnosticsWindow.id)
-            window.center()
-            diagnosticsWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        diagnosticsWindow?.makeKeyAndOrderFront(nil)
     }
 }
 
@@ -197,6 +229,6 @@ final class AnchorPanel: NSPanel {
     }
 }
 
-enum DiagnosticsWindow {
-    static let id = "diagnostics"
+enum SetupWindow {
+    static let id = "setup"
 }

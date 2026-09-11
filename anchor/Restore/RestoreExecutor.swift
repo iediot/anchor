@@ -9,6 +9,7 @@ protocol RestoreExecutor {
     func openBrowserWindow(_ request: BrowserOpenRequest) async -> ExecutionOutcome
     func openTerminalSession(_ request: TerminalOpenRequest) async -> ExecutionOutcome
     func openProject(_ request: ProjectOpenRequest) async -> ExecutionOutcome
+    func openApplication(_ request: AppOpenRequest) async -> ExecutionOutcome
     func observeNewWindow(bundleID: String, excluding: Set<CGWindowID>, timeout: TimeInterval) async -> WindowEvidence
     func awaitProjectWindow(_ request: ProjectOpenRequest, excluding: Set<CGWindowID>, timeout: TimeInterval) async -> WindowEvidence
     func place(windowID: CGWindowID, appKitFrame: CGRect) async -> PlacementOutcome

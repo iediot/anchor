@@ -51,12 +51,35 @@ final class RestoreCoordinator {
     private(set) var cancelRequested = false
     private(set) var log = OperationLog()
 
+    // a plain open waits for nothing while other applications are still being asked to
+    // open, so its window is looked for once every launch has been requested
+    static let genericReadiness: TimeInterval = 6
+    // an application that was already running may reuse a window rather than open one,
+    // so a new window is given this long to appear before a reused one is considered
+    static let freshWindowGrace: TimeInterval = 1.5
+
+    private struct PendingPlacement {
+        let window: RestorePlanWindow
+        let bundleID: String
+        let before: Set<CGWindowID>
+    }
+
+    private var pending: [PendingPlacement] = []
+
     var isRunning: Bool { phase == .running }
 
     // every open this run asked for, so a repeated window can be attributed
     var launchRequests: Int { log.launchRequests }
 
     var report: String { log.lines().joined(separator: "\n") }
+
+    // opened, and then the layout could not be applied to it
+    var notPlaced: Int {
+        reports.filter { report in
+            guard report.state == .opened || report.state == .reused else { return false }
+            return report.items.contains { $0.kind == .layout && $0.state == .failed }
+        }.count
+    }
 
     var summary: String {
         let opened = reports.filter { $0.state == .opened || $0.state == .reused }.count
@@ -65,6 +88,9 @@ final class RestoreCoordinator {
         let cancelled = reports.filter { $0.state == .cancelled }.count
         var parts = ["\(opened) of \(reports.count) windows opened"]
         if failed > 0 { parts.append("\(failed) failed") }
+        // a window that opened and then would not take its rectangle is a partial success,
+        // so it is counted here rather than disappearing into the opened total
+        if notPlaced > 0 { parts.append("\(notPlaced) opened but not placed as asked") }
         if skipped > 0 { parts.append("\(skipped) skipped") }
         if cancelled > 0 { parts.append("\(cancelled) never started because you cancelled") }
         return parts.joined(separator: ", ")
@@ -82,6 +108,8 @@ final class RestoreCoordinator {
         log.record("reopen", "\(plan.actionableWindowCount) windows to open on \(plan.destination.name)")
         prepare(plan, groups: groups)
         phase = .running
+        // whatever way this run leaves, it concludes, so the panel is never left busy
+        defer { conclude() }
 
         outer: for group in groups {
             let actionable = group.windows.filter(\.isActionable)
@@ -105,11 +133,13 @@ final class RestoreCoordinator {
                 await perform(window, group: group, plan: plan, executor: executor)
             }
         }
-        conclude()
+        // every launch has been asked for by now, so this holds nothing up
+        await placePending(plan: plan, executor: executor)
     }
 
     private func prepare(_ plan: RestorePlan, groups: [RestoreGroup]) {
         cancelRequested = false
+        pending = []
         planID = plan.id
         snapshotName = plan.snapshotName
         startedAt = Date()
@@ -165,6 +195,7 @@ final class RestoreCoordinator {
                        summary: "\(request.projectName) was already open on \(plan.destination.name), so anchor reused that window and opened nothing",
                        items: items,
                        evidence: reason)
+                log.record("reuse", "\(window.appName) window \(id) was already open, nothing was launched")
                 await applyLayout(window, windowID: id, plan: plan, executor: executor)
                 return
             case .elsewhere(let reason):
@@ -202,10 +233,18 @@ final class RestoreCoordinator {
             log.countLaunch()
             log.record("open", "\(request.projectName) in \(window.appName), request \(log.launchRequests)")
             outcome = await executor.openProject(request)
+        case .openApplication(let request):
+            log.countLaunch()
+            log.record("open", "\(window.appName), request \(log.launchRequests)")
+            outcome = await executor.openApplication(request)
         case .nothing(let reason):
             finish(window.id, state: .skipped, summary: reason, items: plannedItems(window, state: .skipped, detail: reason))
             return
         }
+
+        log.record("launch", outcome.succeeded
+            ? "\(window.appName) took the open"
+            : "\(window.appName) did not open anything")
 
         var items = plannedItems(window, state: outcome.succeeded ? .opened : .failed, detail: nil)
         for (id, result) in outcome.items {
@@ -214,12 +253,21 @@ final class RestoreCoordinator {
 
         var evidence = outcome.window
         if evidence.windowID == nil, outcome.succeeded {
-            if case .openProject(let request) = window.action {
+            switch window.action {
+            case .openProject(let request):
                 // an ide opens a splash first, so the wait is longer and the window has
                 // to carry the project before anchor will touch it
                 evidence = await executor.awaitProjectWindow(request, excluding: before, timeout: 40)
-            } else {
+            case .openApplication:
+                // opening comes first, so nothing is waited for here at all
+                evidence = .none("anchor did not wait here, this application's window is looked for once every launch has been asked for")
+            default:
                 evidence = await executor.observeNewWindow(bundleID: bundleID, excluding: before, timeout: 8)
+            }
+            if case .openApplication = window.action {
+                log.record("identify", "deferred until every launch has been asked for")
+            } else {
+                log.record("identify", evidence.windowID.map { "window \($0)" } ?? "no window was identified")
             }
         }
         finish(window.id,
@@ -228,7 +276,19 @@ final class RestoreCoordinator {
                items: items,
                evidence: evidence.label)
 
-        guard outcome.succeeded, let identified = evidence.windowID else { return }
+        guard outcome.succeeded else { return }
+        if case .openApplication = window.action {
+            hold(window, bundleID: bundleID, before: before, plan: plan)
+            return
+        }
+        guard let identified = evidence.windowID else {
+            // the application opened, anchor simply never got a window it was sure of
+            record(placement: "\(window.appName) opened but anchor could not tell which window was this one, so nothing was placed and the window was left where the application put it",
+                   on: window.id,
+                   state: .failed)
+            log.record("place", "skipped, no window was identified")
+            return
+        }
         guard !cancelRequested else {
             record(placement: "no layout was applied, you cancelled while anchor was waiting for this window",
                    on: window.id,
@@ -238,6 +298,111 @@ final class RestoreCoordinator {
         await applyLayout(window, windowID: identified, plan: plan, executor: executor)
     }
 
+    // a plain open that is worth placing later, kept until every launch has been asked for
+    private func hold(_ window: RestorePlanWindow,
+                      bundleID: String,
+                      before: Set<CGWindowID>,
+                      plan: RestorePlan) {
+        guard window.layout.frame != nil else {
+            record(placement: window.layout.summary, on: window.id, state: .skipped)
+            return
+        }
+        guard plan.permissions.accessibilityGranted else {
+            record(placement: "no layout was applied, accessibility is not granted", on: window.id, state: .skipped)
+            return
+        }
+        guard !bundleID.isEmpty else {
+            record(placement: "this window was saved with no application identifier, so anchor cannot tell which window is its own",
+                   on: window.id,
+                   state: .skipped)
+            return
+        }
+        pending.append(PendingPlacement(window: window, bundleID: bundleID, before: before))
+        record(placement: "anchor is opening the other applications first and will place this window after that",
+               on: window.id,
+               state: .skipped)
+    }
+
+    private enum PendingCandidate {
+        case found(CGWindowID, String)
+        case ambiguous(String)
+        case notYet
+    }
+
+    // the second pass. every launch has been requested, so a short bounded wait here
+    // cannot hold a launch up, and a failure to place one window never touches another
+    private func placePending(plan: RestorePlan, executor: RestoreExecutor) async {
+        guard !pending.isEmpty else { return }
+        log.record("place pass", "\(pending.count) applications to look at")
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(Self.genericReadiness)
+        var waiting = pending
+        pending = []
+        while !waiting.isEmpty, !cancelRequested {
+            let mayReuse = Date().timeIntervalSince(startedAt) >= Self.freshWindowGrace
+            var later: [PendingPlacement] = []
+            for entry in waiting {
+                switch candidate(entry, plan: plan, executor: executor, mayReuse: mayReuse) {
+                case .found(let id, let reason):
+                    log.record("identify", "window \(id) for \(entry.window.appName)")
+                    note(evidence: reason, on: entry.window.id)
+                    await applyLayout(entry.window, windowID: id, plan: plan, executor: executor)
+                case .ambiguous(let reason):
+                    log.record("place", "skipped, more than one window could be this one")
+                    record(placement: reason, on: entry.window.id, state: .failed)
+                case .notYet:
+                    later.append(entry)
+                }
+            }
+            waiting = later
+            if waiting.isEmpty || Date() >= deadline { break }
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+        for entry in waiting {
+            log.record("place", "skipped, no window was identified for \(entry.window.appName)")
+            let reason = cancelRequested
+                ? "\(entry.window.appName) opened and you cancelled before anchor placed it, so it was left where it is"
+                : "\(entry.window.appName) opened but showed no window anchor could tie to this saved one within \(Int(Self.genericReadiness)) seconds, so nothing was moved"
+            record(placement: reason, on: entry.window.id, state: .failed)
+        }
+    }
+
+    // a window this open produced, or the single window of an application that was already
+    // running, and never a choice between several
+    private func candidate(_ entry: PendingPlacement,
+                           plan: RestorePlan,
+                           executor: RestoreExecutor,
+                           mayReuse: Bool) -> PendingCandidate {
+        let live = executor.liveWindows(bundleID: entry.bundleID)
+        let fresh = live.filter { !entry.before.contains($0.id) }
+        if fresh.count == 1, let found = fresh.first {
+            return .found(found.id, "window \(found.id) is the one window \(entry.window.appName) opened while this run was going")
+        }
+        if fresh.count > 1 {
+            return .ambiguous("\(entry.window.appName) opened \(fresh.count) windows and anchor cannot tell which one this saved window is, so none of them was moved")
+        }
+        guard mayReuse else { return .notYet }
+        // nothing new appeared, so the application reused a window it already had. that is
+        // only unambiguous when this state holds one window of it and the display holds one
+        guard saved(of: entry.bundleID, in: plan) == 1 else { return .notYet }
+        let here = live.filter { RestoreReuse.isOn(plan.destination, frame: $0.appKitFrame) }
+        guard here.count == 1, let found = here.first else { return .notYet }
+        return .found(found.id, "window \(found.id) is the only \(entry.window.appName) window on \(plan.destination.name) and this state holds one saved window of it")
+    }
+
+    private func saved(of bundleID: String, in plan: RestorePlan) -> Int {
+        plan.groups
+            .filter { $0.bundleID == bundleID }
+            .flatMap(\.windows)
+            .filter(\.isActionable)
+            .count
+    }
+
+    private func note(evidence: String, on id: String) {
+        guard let index = reports.firstIndex(where: { $0.id == id }) else { return }
+        reports[index].evidence = evidence
+    }
+
     // only a window this operation created, or one confidently reused on the destination,
     // is ever moved, and never one the application put on another display
     private func applyLayout(_ window: RestorePlanWindow,
@@ -245,10 +410,12 @@ final class RestoreCoordinator {
                              plan: RestorePlan,
                              executor: RestoreExecutor) async {
         guard let frame = window.layout.frame else {
+            log.record("place", "skipped, this window has no rectangle to apply")
             record(placement: window.layout.summary, on: window.id, state: .skipped)
             return
         }
         guard plan.permissions.accessibilityGranted else {
+            log.record("place", "skipped, accessibility is not granted")
             record(placement: "no layout was applied, accessibility is not granted",
                    on: window.id,
                    state: .skipped)
@@ -256,6 +423,7 @@ final class RestoreCoordinator {
         }
         let live = executor.liveWindows(bundleID: window.bundleID ?? "").first { $0.id == windowID }
         if let live, !RestoreReuse.isOn(plan.destination, frame: live.appKitFrame) {
+            log.record("place", "skipped, the window is not on the destination display")
             record(placement: "the application put this window outside \(plan.destination.name), so anchor left it alone rather than dragging it across",
                    on: window.id,
                    state: .skipped)
@@ -263,13 +431,16 @@ final class RestoreCoordinator {
         }
         let outcome = await executor.place(windowID: windowID, appKitFrame: frame)
         guard case .applied = outcome else {
+            log.record("place", "window \(windowID) refused")
             record(placement: outcome.label, on: window.id, state: .failed)
             return
         }
+        log.record("place", "window \(windowID) accepted")
         let settled = await PlacementSettle.verify(windowID: windowID,
                                                    bundleID: window.bundleID ?? "",
                                                    requested: frame,
                                                    executor: executor)
+        log.record("settle", settled.state == .opened ? "held" : "drifted and was left alone")
         record(placement: settled.text, on: window.id, state: settled.state)
     }
 

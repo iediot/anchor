@@ -9,82 +9,9 @@ struct RecentProjectEntry {
 
 // jetbrains ides ship no scripting dictionary so windows are matched by title
 // the recent projects file is read only and is a candidate list, never proof a project is open
+// capture and restore both read it through here
 enum JetBrainsProbe {
     private static let configRoot = ("~/Library/Application Support/JetBrains" as NSString).expandingTildeInPath
-
-    static func run(_ kind: IntegrationKind, scan: WindowScan) async -> ProbeResult {
-        let prefix = kind == .pycharm ? "PyCharm" : "CLion"
-        guard let stateFile = newestStateFile(prefix: prefix) else {
-            return ProbeResult(kind: kind, ranAt: Date(),
-                               summary: "no recentProjects.xml found under the jetbrains config directory",
-                               succeeded: false, rows: [], notes: [])
-        }
-
-        let entries = parse(stateFile)
-        let onScreen = scan.windows(ofBundleID: kind.bundleID)
-        let inScope = onScreen.filter(\.inScope)
-        var rows: [ProbeRow] = [ProbeRow(label: "state file", detail: stateFile)]
-        var resolved = 0
-        var ambiguous = 0
-        var untitled = 0
-
-        for window in onScreen {
-            let placement = window.inScope ? "on the destination display" : window.scopeReason
-            guard let title = window.title else {
-                untitled += 1
-                rows.append(ProbeRow(label: "window \(window.id)",
-                                     detail: "no title available, accessibility is needed for a title, \(placement)"))
-                continue
-            }
-            let hits = candidates(title: title, among: entries)
-            let verdict: String
-            switch hits.count {
-            case 0: verdict = "no recent project matched the leading title segment"
-            case 1: resolved += 1; verdict = "\(hits[0].path) matched on the leading title segment"
-            default:
-                ambiguous += 1
-                verdict = "ambiguous, \(hits.count) recent projects share this name (\(hits.map(\.path).joined(separator: ", "))), none chosen"
-            }
-            rows.append(ProbeRow(label: "window \(window.id) \(title)", detail: "\(verdict), \(placement)"))
-        }
-        for entry in entries.prefix(8) {
-            rows.append(ProbeRow(label: "recent candidate",
-                                 detail: "\(entry.path) name \(entry.projectName ?? "unknown") last frame title \(entry.frameTitle ?? "none")"))
-        }
-
-        var notes = [
-            "the window title's leading segment is the project name, the trailing segment is the open file",
-            "the state file is written when the ide saves state so it lags a live window and can be stale",
-            "the file layout is version specific, this run read the newest matching config directory",
-            "a matched recent project is a candidate confirmed by a live window title, an unmatched one is not evidence of anything",
-            "no recent project was opened and nothing was written back"
-        ]
-        if onScreen.isEmpty {
-            notes.append("no window of this app is on the current desktop of any display, so nothing could be matched and this is not evidence that matching fails")
-        }
-        if untitled > 0 {
-            notes.append("\(untitled) windows had no readable title, which blocks matching rather than disproving it")
-        }
-
-        let summary = onScreen.isEmpty
-            ? "no windows on the current desktop, read \(entries.count) recent project candidates, nothing matched or refuted"
-            : "\(resolved) of \(onScreen.count) on-screen windows matched exactly one recent project, \(ambiguous) ambiguous, \(untitled) untitled"
-        let evidence = ProbeEvidence(scanCapturedAt: scan.capturedAt,
-                                     scriptedWindows: 0,
-                                     onScreenWindows: onScreen.count,
-                                     inScopeWindows: inScope.count,
-                                     uniquePairs: resolved,
-                                     identifiedPairs: 0,
-                                     identityConflicts: 0,
-                                     ambiguousPairs: ambiguous,
-                                     contestedPairs: 0,
-                                     excludedByReportedState: 0,
-                                     unmatchedScriptedWindows: onScreen.count - resolved - ambiguous,
-                                     matchingBasis: "window title matched against the ide's recent projects file",
-                                     relationship: .notApplicable)
-        return ProbeResult(kind: kind, ranAt: Date(), summary: summary,
-                           succeeded: true, rows: rows, notes: notes, evidence: evidence)
-    }
 
     static func newestStateFile(prefix: String) -> String? {
         let manager = FileManager.default

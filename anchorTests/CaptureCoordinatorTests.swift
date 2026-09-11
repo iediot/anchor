@@ -114,5 +114,6 @@ final class CaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(CaptureCoordinator.resourceKind(for: .pycharm), .jetBrains)
         XCTAssertEqual(CaptureCoordinator.resourceKind(for: .clion), .jetBrains)
         XCTAssertEqual(CaptureCoordinator.resourceKind(for: .xcode), .xcode)
+        XCTAssertEqual(CaptureCoordinator.resourceKind(for: .finder), .finder)
     }
 }

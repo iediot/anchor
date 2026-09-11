@@ -8,6 +8,7 @@ enum IntegrationKind: String, CaseIterable, Identifiable {
     case pycharm
     case clion
     case xcode
+    case finder
 
     var id: String { rawValue }
 
@@ -20,6 +21,7 @@ enum IntegrationKind: String, CaseIterable, Identifiable {
         case .pycharm: return "com.jetbrains.pycharm"
         case .clion: return "com.jetbrains.CLion"
         case .xcode: return "com.apple.dt.Xcode"
+        case .finder: return "com.apple.finder"
         }
     }
 
@@ -32,6 +34,7 @@ enum IntegrationKind: String, CaseIterable, Identifiable {
         case .pycharm: return "PyCharm"
         case .clion: return "CLion"
         case .xcode: return "Xcode"
+        case .finder: return "Finder"
         }
     }
 

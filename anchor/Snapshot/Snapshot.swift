@@ -75,10 +75,12 @@ nonisolated enum ResourceKind: String, Codable {
     case terminal
     case jetBrains
     case xcode
+    case finder
     case unsupported
 
     var label: String {
         switch self {
+        case .finder: return "finder folder"
         case .browser: return "browser tabs"
         case .terminal: return "terminal directories"
         case .jetBrains: return "jetbrains project"
@@ -167,6 +169,16 @@ nonisolated struct JetBrainsResource: Codable {
     var editorFileState: String
 }
 
+// the folder one finder window was showing, from the window itself
+// accessibility names it for some windows, finder's own scripting for the rest, and a
+// window that named neither keeps no path at all rather than one taken from its title
+nonisolated struct FinderResource: Codable {
+    var scriptWindowID: Int?
+    var path: String?
+    var pathSource: String?
+    var issue: String?
+}
+
 nonisolated struct XcodeResource: Codable {
     var scriptWindowID: Int?
     var workingDocumentPath: String?
@@ -184,6 +196,7 @@ nonisolated struct WindowResources: Codable {
     var terminal: TerminalResource?
     var jetBrains: JetBrainsResource?
     var xcode: XcodeResource?
+    var finder: FinderResource?
 
     static func empty(_ kind: ResourceKind, _ status: ResourceStatus, _ detail: String? = nil) -> WindowResources {
         WindowResources(kind: kind, status: status, detail: detail)

@@ -71,26 +71,118 @@ struct LiveRestoreExecutor: RestoreExecutor {
                                 items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
     }
 
+    // launchservices calls back when the application has taken the open event, and an ide
+    // that is still starting can hold that callback for as long as it likes, so this is
+    // the one wait in a reopen with no bound of its own
+    static let launchAcknowledgement: TimeInterval = 25
+
+    private enum Handover {
+        case acknowledged
+        case unacknowledged
+        case refused(String)
+    }
+
     // a project is opened through the installed application itself, with a file url as an
     // argument, so no script text and no shell is involved
+    // the open is asked for exactly once, whatever the acknowledgement does
     func openProject(_ request: ProjectOpenRequest) async -> ExecutionOutcome {
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.app.bundleID) else {
             return .failed("\(request.app.displayName) is not installed on this mac")
         }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.addsToRecentItems = true
-        do {
-            _ = try await NSWorkspace.shared.open([URL(fileURLWithPath: request.path)],
-                                                  withApplicationAt: appURL,
-                                                  configuration: configuration)
+        let appName = request.app.displayName
+        let seconds = Int(Self.launchAcknowledgement)
+        switch await hand(path: request.path, to: appURL, appName: appName) {
+        case .refused(let reason):
+            return .failed(reason)
+        case .acknowledged:
             return ExecutionOutcome(succeeded: true,
-                                    summary: "\(request.projectName) was handed to \(request.app.displayName)",
+                                    summary: "\(request.projectName) was handed to \(appName)",
                                     window: .none("the application does not report which window it used"),
                                     items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
-        } catch {
-            return .failed("\(request.app.displayName) refused to open \(request.projectName): \(error.localizedDescription)")
+        case .unacknowledged:
+            // the launch itself carries on, anchor only stopped waiting to be told about it
+            guard isRunning(bundleID: request.app.bundleID) else {
+                return .failed("\(appName) did not acknowledge opening \(request.projectName) within \(seconds) seconds and is not running. anchor did not ask again")
+            }
+            let detail = "handed over, \(appName) did not acknowledge within \(seconds) seconds"
+            return ExecutionOutcome(succeeded: true,
+                                    summary: "\(request.projectName) was handed to \(appName), which is running but did not acknowledge within \(seconds) seconds. anchor did not ask again and went on to look for the window",
+                                    window: .none("the application never acknowledged the open, so it named no window"),
+                                    items: [request.itemID: ItemOutcome(state: .opened, detail: detail)])
         }
+    }
+
+    // the open runs against a deadline. losing the race abandons the acknowledgement only,
+    // it never cancels the launch and never asks for a second one
+    // with no path this opens the application itself, which is the whole of a plain open
+    private func hand(path: String?, to appURL: URL, appName: String) async -> Handover {
+        await withTaskGroup(of: Handover?.self) { group -> Handover in
+            group.addTask {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                configuration.addsToRecentItems = true
+                do {
+                    if let path {
+                        _ = try await NSWorkspace.shared.open([URL(fileURLWithPath: path)],
+                                                              withApplicationAt: appURL,
+                                                              configuration: configuration)
+                    } else {
+                        _ = try await NSWorkspace.shared.openApplication(at: appURL,
+                                                                         configuration: configuration)
+                    }
+                    return .acknowledged
+                } catch {
+                    return .refused("\(appName) refused the open: \(error.localizedDescription)")
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(Self.launchAcknowledgement))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? .unacknowledged
+        }
+    }
+
+    // an application anchor has no adapter for, resolved by its saved identifier and opened
+    // through the same launch call a project uses, with the saved item when there is one
+    // it is opened once, and it is never asked to open anything anchor guessed
+    func openApplication(_ request: AppOpenRequest) async -> ExecutionOutcome {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: request.bundleID) else {
+            return .failed("\(request.appName) is not installed on this mac")
+        }
+        // a path saved with the window, checked again here because a preview can be old
+        var path = request.path
+        if let candidate = path, !FileManager.default.fileExists(atPath: candidate) {
+            path = nil
+        }
+        let seconds = Int(Self.launchAcknowledgement)
+        let opened = path == nil
+            ? "\(request.appName) was opened; its previous contents are unavailable"
+            : "\(request.appName) was opened with the item this window had open"
+        switch await hand(path: path, to: appURL, appName: request.appName) {
+        case .refused(let reason):
+            return .failed(reason)
+        case .acknowledged:
+            return ExecutionOutcome(succeeded: true,
+                                    summary: opened,
+                                    window: .none("anchor did not wait for a window, so this application named none"),
+                                    items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
+        case .unacknowledged:
+            guard isRunning(bundleID: request.bundleID) else {
+                return .failed("\(request.appName) did not open within \(seconds) seconds and is not running. anchor did not ask again")
+            }
+            return ExecutionOutcome(succeeded: true,
+                                    summary: "\(opened), though it did not acknowledge within \(seconds) seconds. anchor did not ask again",
+                                    window: .none("anchor did not wait for a window, so this application named none"),
+                                    items: [request.itemID: ItemOutcome(state: .opened, detail: "handed over, not acknowledged")])
+        }
+    }
+
+    private func isRunning(bundleID: String) -> Bool {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .contains { !$0.isTerminated }
     }
 
     // a bounded look for the one window that appeared, never a fixed sleep and never the

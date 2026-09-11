@@ -45,6 +45,16 @@ enum Permissions {
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
     }
 
+    // the system asks once, and it blocks while the sheet is up, so it is asked off the
+    // main actor. an answer given here only reaches a capture after anchor is opened again
+    static func requestScreenRecording() async -> Bool {
+        await Task.detached { CGRequestScreenCaptureAccess() }.value
+    }
+
+    static func openScreenRecordingSettings() {
+        open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    }
+
     private static func open(_ string: String) {
         guard let url = URL(string: string) else { return }
         NSWorkspace.shared.open(url)

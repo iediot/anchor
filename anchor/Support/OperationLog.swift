@@ -46,9 +46,9 @@ struct OperationLog: Equatable {
     func lines() -> [String] {
         var out = ["anchor operation \(id)"]
         if let trigger { out.append("action: \(trigger)") }
-        if let startedAt { out.append("started: \(ProbeEvidence.stamp(startedAt))") }
+        if let startedAt { out.append("started: \(Stamp.text(startedAt))") }
         for event in events {
-            out.append("\(ProbeEvidence.stamp(event.at)) \(event.stage): \(event.detail)")
+            out.append("\(Stamp.text(event.at)) \(event.stage): \(event.detail)")
         }
         out.append("counts: \(counts)")
         return out

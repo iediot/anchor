@@ -7,12 +7,18 @@ enum CaptureCoordinator {
     struct Options {
         var includeBrowserTabs: Bool
         var name: String?
+        // only a save a person asked for takes a picture of the screen
+        // a save on the way out of a switch, and every restore, leaves the screen alone
+        var captureThumbnail = false
     }
 
     struct Outcome {
         var snapshot: Snapshot?
         var storeError: String?
         var summary: String
+        // the blurred miniature of the display, ready to be filed under the snapshot id
+        var thumbnail: Data? = nil
+        var thumbnailFailure: ThumbnailFailure? = nil
     }
 
     static let browserOmissionDetail = "browser tabs were left out of this save at the user's request"
@@ -20,6 +26,16 @@ enum CaptureCoordinator {
     static func capture(options: Options, focusPID: pid_t?, store: SnapshotStore?) async -> Outcome {
         let scan = WindowInspector.scan(preferredOwner: focusPID)
         let scoped = scan.inScope
+        // taken at the start, alongside the geometry this snapshot records, so the picture
+        // and the rectangles describe the same moment
+        var thumbnail: Data?
+        var thumbnailFailure: ThumbnailFailure?
+        if options.captureThumbnail {
+            switch await DisplayScreenshot.blurredThumbnail(displayID: scan.target.displayID) {
+            case .success(let data): thumbnail = data
+            case .failure(let reason): thumbnailFailure = reason
+            }
+        }
         var issues: [CaptureIssue] = []
         var adapters: [AdapterRun] = []
         var resources: [CGWindowID: WindowResources] = [:]
@@ -99,7 +115,11 @@ enum CaptureCoordinator {
                            storeError: error.localizedDescription,
                            summary: "capture ran but nothing could be stored")
         }
-        return Outcome(snapshot: snapshot, storeError: nil, summary: summary(snapshot))
+        return Outcome(snapshot: snapshot,
+                       storeError: nil,
+                       summary: summary(snapshot),
+                       thumbnail: thumbnail,
+                       thumbnailFailure: thumbnailFailure)
     }
 
     private static func run(_ kind: IntegrationKind,
@@ -140,6 +160,7 @@ enum CaptureCoordinator {
         case .safari, .chrome: return await BrowserCapture.capture(kind, scan: scan)
         case .terminal, .iTerm: return await TerminalCapture.capture(kind, scan: scan)
         case .xcode: return await XcodeCapture.capture(scan: scan)
+        case .finder: return await FinderCapture.capture(scan: scan)
         case .pycharm, .clion: return await JetBrainsCapture.capture(kind, scan: scan)
         }
     }
@@ -150,6 +171,7 @@ enum CaptureCoordinator {
         case .terminal, .iTerm: return .terminal
         case .pycharm, .clion: return .jetBrains
         case .xcode: return .xcode
+        case .finder: return .finder
         }
     }
 
@@ -227,8 +249,10 @@ enum CaptureCoordinator {
             notes.append("the project match comes from the window title and the ide's recent projects file, and any open files come from the persisted workspace file rather than the live editor")
         case .terminal where resources.status == .captured:
             notes.append("a directory is the current directory of the tty's foreground process group, which is the shell at an idle prompt and the running job otherwise")
+        case .finder where resources.status == .captured:
+            notes.append("the folder this window was showing was recorded, its selection, view and sidebar were not")
         case .unsupported:
-            notes.append("no adapter, only window identity and geometry were stored, this window is not restorable")
+            notes.append("no adapter, only window identity and geometry were stored, so anchor can open the application and no more")
         default:
             break
         }

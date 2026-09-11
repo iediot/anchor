@@ -39,7 +39,7 @@ final class PanelLayoutTests: XCTestCase {
     private static let width: CGFloat = 380
 
     private var panel: some View {
-        AnchorPanelView(model: model, diagnostics: DiagnosticsModel())
+        AnchorPanelView(model: model, setup: PermissionsSetupModel())
     }
 
     private var rows: some View {
@@ -133,7 +133,7 @@ final class PanelLayoutTests: XCTestCase {
     func testTheEmptyStateStillRendersWithoutRows() {
         let empty = SavedStatesModel(store: SnapshotStore(root: root.appendingPathComponent("empty")))
         XCTAssertTrue(empty.snapshots.isEmpty)
-        let height = panelHeight(AnchorPanelView(model: empty, diagnostics: DiagnosticsModel()))
+        let height = panelHeight(AnchorPanelView(model: empty, setup: PermissionsSetupModel()))
         // header, save button, the empty line and the footer, the redesign carries no
         // browser toggle or display line on the home screen any more
         XCTAssertGreaterThan(height, 150)

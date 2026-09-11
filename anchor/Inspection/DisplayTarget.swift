@@ -22,7 +22,7 @@ struct DisplayTarget {
 
     var originDescription: String {
         guard let pinnedFrom else { return source.rawValue }
-        return "\(source.rawValue), kept from the selection made at \(ProbeEvidence.stamp(pinnedFrom))"
+        return "\(source.rawValue), kept from the selection made at \(Stamp.text(pinnedFrom))"
     }
 
     // a rescan taken for a probe must not let anchor's own focus redefine the destination

@@ -21,6 +21,8 @@ final class SavedStatesModel {
     private(set) var lastOutcome: CaptureCoordinator.Outcome?
     private(set) var renameError: String?
     private(set) var deleteError: String?
+    // why the last save has no picture behind its miniature, when it has none
+    private(set) var thumbnailIssue: ThumbnailFailure?
     // the entry whose name is being edited, and the entry waiting for a delete confirmation
     private(set) var renaming: String?
     private(set) var confirmingDelete: String?
@@ -33,7 +35,6 @@ final class SavedStatesModel {
     var route: PanelRoute = .home
     let restore: RestoreCoordinator
     let replacement: ReplacementCoordinator
-    let launch = LaunchDiagnosticsCoordinator()
     private(set) var plan: RestorePlan?
     private(set) var planning = false
     private(set) var planError: String?
@@ -42,7 +43,7 @@ final class SavedStatesModel {
     private var environment: LiveRestoreEnvironment?
 
     // one operation at a time, and no second press of the same button
-    var busy: Bool { saving || planning || restore.isRunning || replacement.isRunning || launch.isRunning }
+    var busy: Bool { saving || planning || restore.isRunning || replacement.isRunning }
 
     // the explanation is shown once, the choice it takes becomes the standing setting
     var browserDisclosurePending = false
@@ -63,6 +64,10 @@ final class SavedStatesModel {
 
     private let defaults = UserDefaults.standard
     private let store: SnapshotStore?
+    private let thumbnails: ThumbnailStore?
+    // decoded pictures, read once each. kept out of observation, so a view asking for one
+    // while it draws does not invalidate itself
+    @ObservationIgnored private var thumbnailImages: [String: NSImage?] = [:]
 
     init(store: SnapshotStore? = nil) {
         let restore = RestoreCoordinator()
@@ -76,6 +81,7 @@ final class SavedStatesModel {
             self.store = made.store
             storeError = made.error
         }
+        thumbnails = self.store.map { ThumbnailStore.alongside($0) }
         includeBrowserTabs = (defaults.object(forKey: Keys.includeBrowserTabs) as? Bool) ?? true
         browserDisclosureShown = defaults.bool(forKey: Keys.disclosureShown)
         reload()
@@ -90,6 +96,16 @@ final class SavedStatesModel {
 
     var recent: [Snapshot] { Array(snapshots.prefix(8)) }
 
+    // the blurred picture taken when this layout was saved, if there is one
+    // an older layout, or one saved without the permission, simply has none and the
+    // miniature falls back to its window rectangles
+    func thumbnailImage(for id: String) -> NSImage? {
+        if let hit = thumbnailImages[id] { return hit }
+        let image = thumbnails?.data(for: id).flatMap { NSImage(data: $0) }
+        thumbnailImages[id] = image
+        return image
+    }
+
     // the grid reads oldest first, left to right, while everything else keeps the
     // newest first order the store loads
     var oldestFirst: [Snapshot] {
@@ -99,6 +115,9 @@ final class SavedStatesModel {
     }
 
     func reload() {
+        if thumbnailIssue == .permissionMissing, Permissions.screenRecordingGranted {
+            thumbnailIssue = nil
+        }
         guard let store else { return }
         let loaded = store.loadAll()
         snapshots = loaded.snapshots
@@ -212,37 +231,6 @@ final class SavedStatesModel {
         route = .preview
     }
 
-    // the temporary launch diagnostic, on the same gate as save, reopen and replacement
-    // so a diagnostic run and a real operation can never overlap
-    func requestLaunchDiagnostic(_ mode: LaunchDiagnosticMode, projectPath: String) {
-        guard !busy else { return }
-        Task { await runLaunchDiagnostic(mode, projectPath: projectPath) }
-    }
-
-    func runLaunchDiagnostic(_ mode: LaunchDiagnosticMode, projectPath: String) async {
-        guard !busy else { return }
-        let request = ProjectOpenRequest(app: .pycharm,
-                                         itemID: "launch-diagnostic",
-                                         path: projectPath,
-                                         projectName: (projectPath as NSString).lastPathComponent)
-        let granted = Permissions.accessibilityGranted
-        // no automation is looked up, this application is not scripted and the launch
-        // stage must touch nothing but the launch
-        let environment = LiveRestoreEnvironment(accessibilityGranted: granted, automation: [:])
-        var rectangle: LaunchRectangle?
-        if mode == .place {
-            rectangle = LaunchRectangleSource.resolve(projectPath: projectPath,
-                                                      snapshots: snapshots,
-                                                      destination: resolveDestination())
-        }
-        await launch.run(mode: mode,
-                         project: request,
-                         rectangle: rectangle,
-                         accessibilityGranted: granted,
-                         probe: LiveLaunchProcessProbe(),
-                         executor: LiveRestoreExecutor(environment: environment))
-    }
-
     func requestPartialCaptureDecision() {
         Task {
             await replacement.continueAfterPartialCapture()
@@ -337,6 +325,10 @@ final class SavedStatesModel {
             deleteError = error.localizedDescription
             return
         }
+        // the layout's own file is gone, so its picture goes too. a picture that will not
+        // move is not worth failing a delete that already happened
+        try? thumbnails?.trash(id: id)
+        thumbnailImages.removeValue(forKey: id)
         deleteError = nil
         confirmingDelete = nil
         if renaming == id { renaming = nil }
@@ -389,15 +381,37 @@ final class SavedStatesModel {
         guard !busy else { return }
         saving = true
         defer { saving = false }
+        thumbnailIssue = nil
+        // a save a person asked for is the one place a picture of the screen is taken
         let outcome = await CaptureCoordinator.capture(
-            options: CaptureCoordinator.Options(includeBrowserTabs: include, name: nil),
+            options: CaptureCoordinator.Options(includeBrowserTabs: include,
+                                                name: nil,
+                                                captureThumbnail: true),
             focusPID: FocusTracker.shared.lastExternalPID,
             store: store)
         lastOutcome = outcome
+        if let saved = outcome.snapshot {
+            storeThumbnail(outcome.thumbnail, for: saved.id, failure: outcome.thumbnailFailure)
+        }
         reload()
         if let saved = outcome.snapshot {
             select(saved.id)
             revealNewest = true
+        }
+    }
+
+    // the picture is filed under the snapshot's own identifier, and a save that got none
+    // is still a save, it keeps the miniature drawn from its rectangles
+    private func storeThumbnail(_ data: Data?, for id: String, failure: ThumbnailFailure?) {
+        guard let data, let thumbnails else {
+            thumbnailIssue = failure
+            return
+        }
+        do {
+            try thumbnails.write(data, for: id)
+            thumbnailImages.removeValue(forKey: id)
+        } catch {
+            thumbnailIssue = .notStored(error.localizedDescription)
         }
     }
 

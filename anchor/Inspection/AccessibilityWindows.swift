@@ -18,9 +18,15 @@ enum AccessibilityWindows {
         elements(pid: pid).map(\.facts)
     }
 
+    // an application that is still starting answers accessibility when it feels like it,
+    // and the system default leaves a read waiting far longer than a poll can afford
+    // the timeout is set on the application element, which is what every read goes through
+    nonisolated static let messagingTimeout: Float = 2
+
     // the element is needed to place a window, the facts alone cannot be moved
     nonisolated static func elements(pid: pid_t) -> [(element: AXUIElement, facts: AXWindowFacts)] {
         let app = AXUIElementCreateApplication(pid)
+        _ = AXUIElementSetMessagingTimeout(app, messagingTimeout)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
               let elements = value as? [AXUIElement]

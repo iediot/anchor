@@ -179,6 +179,7 @@ final class RecordingExecutor: RestoreExecutor {
         case browser(BrowserOpenRequest)
         case terminal(TerminalOpenRequest)
         case project(ProjectOpenRequest)
+        case application(AppOpenRequest)
         case observe(String)
         case awaitProject(String)
         case place(CGWindowID, CGRect)
@@ -202,6 +203,12 @@ final class RecordingExecutor: RestoreExecutor {
     var projectOutcome: (ProjectOpenRequest) -> ExecutionOutcome = { request in
         ExecutionOutcome(succeeded: true,
                          summary: "handed over",
+                         window: .none("no window id"),
+                         items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
+    }
+    var applicationOutcome: (AppOpenRequest) -> ExecutionOutcome = { request in
+        ExecutionOutcome(succeeded: true,
+                         summary: "opened",
                          window: .none("no window id"),
                          items: [request.itemID: ItemOutcome(state: .opened, detail: nil)])
     }
@@ -254,6 +261,12 @@ final class RecordingExecutor: RestoreExecutor {
         return projectOutcome(request)
     }
 
+    func openApplication(_ request: AppOpenRequest) async -> ExecutionOutcome {
+        calls.append(.application(request))
+        onOpen?()
+        return applicationOutcome(request)
+    }
+
     func observeNewWindow(bundleID: String, excluding: Set<CGWindowID>, timeout: TimeInterval) async -> WindowEvidence {
         calls.append(.observe(bundleID))
         return observation
@@ -292,7 +305,7 @@ final class RecordingExecutor: RestoreExecutor {
     var openCalls: [Call] {
         calls.filter { call in
             switch call {
-            case .browser, .terminal, .project: return true
+            case .browser, .terminal, .project, .application: return true
             default: return false
             }
         }

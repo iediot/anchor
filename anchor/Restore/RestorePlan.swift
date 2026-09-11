@@ -13,9 +13,13 @@ enum RestoreItemKind: String {
     case editorFile
     case layout
     case window
+    case application
+    case folder
 
     var label: String {
         switch self {
+        case .application: return "application"
+        case .folder: return "folder"
         case .browserTab: return "tab"
         case .blankTab: return "blank tab"
         case .terminalSession: return "shell session"
@@ -108,10 +112,22 @@ struct ProjectOpenRequest: Equatable {
     let projectName: String
 }
 
+// an application anchor has no adapter for, opened as itself
+// the path is a document or folder the window itself advertised when it was saved, never
+// a guess from a title or from a recent documents list, and it is only carried here when
+// it still exists
+struct AppOpenRequest: Equatable {
+    let bundleID: String
+    let appName: String
+    let itemID: String
+    let path: String?
+}
+
 enum RestoreAction: Equatable {
     case openBrowserWindow(BrowserOpenRequest)
     case openTerminalSession(TerminalOpenRequest)
     case openProject(ProjectOpenRequest)
+    case openApplication(AppOpenRequest)
     case nothing(String)
 
     var isActionable: Bool {
@@ -124,7 +140,7 @@ enum RestoreAction: Equatable {
     var needsAutomation: Bool {
         switch self {
         case .openBrowserWindow, .openTerminalSession: return true
-        case .openProject, .nothing: return false
+        case .openProject, .openApplication, .nothing: return false
         }
     }
 
@@ -136,6 +152,10 @@ enum RestoreAction: Equatable {
             return "open a new \(request.app.displayName) window at \(request.directory)"
         case .openProject(let request):
             return "open \(request.projectName) in \(request.app.displayName)"
+        case .openApplication(let request):
+            return request.path == nil
+                ? "open \(request.appName)"
+                : "open \(request.appName) with the item this window had open"
         case .nothing(let reason):
             return "nothing will be opened, \(reason)"
         }

@@ -1,9 +1,11 @@
 import AppKit
 import SwiftUI
 
-// opening the diagnostics window is the presenter's job, the panel only asks
+// opening the setup window and putting a report on the pasteboard are the presenter's
+// job, the panel only asks
 extension EnvironmentValues {
-    @Entry var openDiagnostics: () -> Void = {}
+    @Entry var openSetup: () -> Void = {}
+    @Entry var copyTroubleshooting: () -> Void = {}
 }
 
 // the attached surface under the menu bar icon
@@ -11,8 +13,9 @@ extension EnvironmentValues {
 // selected layout and the outcome of a run
 struct AnchorPanelView: View {
     @Bindable var model: SavedStatesModel
-    @Bindable var diagnostics: DiagnosticsModel
-    @Environment(\.openDiagnostics) private var openDiagnostics
+    @Bindable var setup: PermissionsSetupModel
+    @Environment(\.openSetup) private var openSetup
+    @Environment(\.copyTroubleshooting) private var copyTroubleshooting
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     // the plus turns into a tick for a moment when a save lands, and turns back
     @State private var justSaved = false
@@ -51,7 +54,8 @@ struct AnchorPanelView: View {
     private var travellingPreview: some View {
         if let snapshot = travelling, travelRect.width > 1, travelRect.height > 1 {
             LayoutThumbnail(snapshot: snapshot,
-                            fit: CGSize(width: travelRect.width, height: travelRect.height))
+                            fit: CGSize(width: travelRect.width, height: travelRect.height),
+                            backdrop: model.thumbnailImage(for: snapshot.id))
                 .frame(width: travelRect.width, height: travelRect.height)
                 .offset(x: travelRect.minX, y: travelRect.minY)
                 .allowsHitTesting(false)
@@ -411,12 +415,13 @@ struct AnchorPanelView: View {
                 withAnimation(.easeInOut(duration: 0.2)) { justSaved = false }
             }
             Spacer()
-            if !diagnostics.accessibilityGranted {
+            if !setup.accessibilityGranted {
                 Label("Accessibility", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .lineLimit(1)
-                Button("Grant…") { Permissions.requestAccessibility() }
+                // the asking itself belongs to the setup window, the panel only points at it
+                Button("Set Up…") { openSetup() }
                     .buttonStyle(.link)
                     .font(.caption)
             }
@@ -442,9 +447,8 @@ struct AnchorPanelView: View {
         Menu {
             Toggle("Include browser tabs when saving", isOn: $model.includeBrowserTabs)
             Divider()
-            Button("Diagnostics…") { openDiagnostics() }
-            // the temporary pycharm launch test lives in that window
-            Button("PyCharm Launch Test…") { openDiagnostics() }
+            Button("Permissions…") { openSetup() }
+            Button("Copy Troubleshooting Report") { copyTroubleshooting() }
             Divider()
             Button("Quit Anchor") { NSApplication.shared.terminate(nil) }
         } label: {
@@ -530,7 +534,8 @@ struct SavedLayoutTile: View {
                 // the miniature carries its own outlines, the tile itself has no box
                 LayoutThumbnail(snapshot: snapshot,
                                 fit: CGSize(width: PanelMetrics.tileWidth,
-                                            height: PanelMetrics.tileThumbnailHeight))
+                                            height: PanelMetrics.tileThumbnailHeight),
+                                backdrop: model.thumbnailImage(for: snapshot.id))
                     .frame(width: PanelMetrics.tileWidth,
                            height: PanelMetrics.tileThumbnailHeight,
                            alignment: .leading)

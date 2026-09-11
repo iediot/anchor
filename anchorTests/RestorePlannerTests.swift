@@ -184,13 +184,19 @@ final class RestorePlannerTests: XCTestCase {
         }
     }
 
-    func testAWindowWithNoAdapterIsNeverLaunched() {
+    // an application with no adapter is opened as itself, and says so rather than
+    // promising the window's contents back
+    func testAWindowWithNoAdapterIsOpenedAsTheApplication() {
         let record = RestoreFixtures.window(app: "Notes",
                                             bundleID: "com.apple.Notes",
                                             resources: .empty(.unsupported, .appNotSupported, "no adapter"))
         let window = onlyWindow(plan([record]))
-        XCTAssertFalse(window.isActionable)
-        guard case .unsupported = window.items[0].status else { return XCTFail("expected an unsupported window") }
+        XCTAssertTrue(window.isActionable)
+        guard case .openApplication(let request) = window.action else {
+            return XCTFail("expected a plain application open")
+        }
+        XCTAssertEqual(request.bundleID, "com.apple.Notes")
+        XCTAssertNil(request.path)
     }
 
     func testBrowserTabsLeftOutOfTheSaveAreReportedAsSuch() {
