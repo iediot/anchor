@@ -96,7 +96,7 @@ struct ReplacementConfirmView: View {
 
     var body: some View {
         HStack(spacing: 6) {
-            Button("Open Alongside") { model.requestExecute() }
+            Button("Open") { model.requestExecute() }
                 .disabled(model.busy || plan.actionableWindowCount == 0)
                 .help("Opens the saved layout and closes nothing")
             Button("Save & Switch") { model.requestReplacement(.saveThenReplace) }

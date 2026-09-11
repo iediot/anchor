@@ -78,8 +78,16 @@ final class PanelLayoutTests: XCTestCase {
     }
 
     func testAShortHistoryOpensCompactRatherThanAtTheCap() {
-        let height = panelHeight(PanelScroll(maxHeight: 460, initialHeight: 92) { rows })
-        XCTAssertEqual(height, 92, accuracy: 1)
+        let height = panelHeight(PanelScroll(maxHeight: 460) { rows })
+        XCTAssertGreaterThan(height, 0)
+        XCTAssertLessThan(height, 460, "a region shorter than its cap must not open at the cap")
+    }
+
+    // a region told to keep its box keeps it even when the content is short, so the panel
+    // around it does not change size with the number of cards
+    func testARegionThatKeepsItsBoxDoesNotShrinkToItsContent() {
+        let height = panelHeight(PanelScroll(maxHeight: 460, fillsItsBox: true) { rows })
+        XCTAssertEqual(height, 460, accuracy: 1)
     }
 
     func testHomeLeavesRoomForTheSavedStateRows() {

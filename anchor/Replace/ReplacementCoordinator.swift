@@ -102,6 +102,14 @@ final class ReplacementCoordinator {
         }
     }
 
+    // the switch did all of it: nothing stopped it, every window it meant to close is
+    // gone, the save it took was whole, and the reopen it ran left nothing to read
+    var fullySucceeded: Bool {
+        guard stage == .finished, !cancelRequested, stopReason == nil, partialCapture == nil else { return false }
+        let closed = closeReports.allSatisfy { $0.state == .closed || $0.state == .alreadyGone }
+        return closed && restore.fullySucceeded
+    }
+
     var canConfirm: Bool {
         guard let preflight, stage == .preflight || stage == .idle else { return false }
         return preflight.accessibilityGranted && preflight.blocking(excluding: excludedOutgoing).isEmpty
@@ -206,6 +214,9 @@ final class ReplacementCoordinator {
             outgoingSnapshotID = snapshot.id
             outgoingSaveSummary = outcome.summary
             log.record("saved", "the outgoing state was stored as \(snapshot.id)")
+            if outcome.thumbnailFailure != nil {
+                log.record("thumbnail", "unavailable, the saved layout uses its schematic preview")
+            }
             if snapshot.completeness != .complete {
                 partialCapture = PartialCapture(snapshotID: snapshot.id,
                                                 completeness: snapshot.completeness,

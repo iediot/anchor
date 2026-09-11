@@ -60,9 +60,18 @@ final class LiveReplacementServices: ReplacementServices {
     }
 
     func captureOutgoing() async -> CaptureCoordinator.Outcome {
-        await CaptureCoordinator.capture(options: CaptureCoordinator.Options(includeBrowserTabs: includeBrowserTabs,
-                                                                            name: nil),
+        var outcome = await CaptureCoordinator.capture(options: CaptureCoordinator.Options(includeBrowserTabs: includeBrowserTabs,
+                                                                            name: nil,
+                                                                            captureThumbnail: true),
                                          focusPID: FocusTracker.shared.lastExternalPID,
                                          store: store)
+        if let snapshot = outcome.snapshot, let data = outcome.thumbnail, let store {
+            do {
+                try ThumbnailStore.alongside(store).write(data, for: snapshot.id)
+            } catch {
+                outcome.thumbnailFailure = .notStored(error.localizedDescription)
+            }
+        }
+        return outcome
     }
 }

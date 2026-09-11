@@ -1,6 +1,6 @@
 import AppKit
 
-// runs one plan, one item at a time, and reports what actually happened
+// different apps overlap while each app's windows stay sequential
 // it never closes, quits or rolls back anything, and it never repeats a creation command
 // after a timeout because the application may already have carried it out
 @MainActor
@@ -65,6 +65,8 @@ final class RestoreCoordinator {
     }
 
     private var pending: [PendingPlacement] = []
+    private var placementTasks: [Task<Void, Never>] = []
+    private var placementWindows: Set<CGWindowID> = []
 
     var isRunning: Bool { phase == .running }
 
@@ -72,6 +74,16 @@ final class RestoreCoordinator {
     var launchRequests: Int { log.launchRequests }
 
     var report: String { log.lines().joined(separator: "\n") }
+
+    // every window opened and every item it carried was opened with it, so there is
+    // nothing left in this report for a person to read
+    var fullySucceeded: Bool {
+        guard phase == .finished, !cancelRequested, !reports.isEmpty else { return false }
+        return reports.allSatisfy { report in
+            (report.state == .opened || report.state == .reused)
+                && report.items.allSatisfy { $0.state != .failed }
+        }
+    }
 
     // opened, and then the layout could not be applied to it
     var notPlaced: Int {
@@ -111,7 +123,9 @@ final class RestoreCoordinator {
         // whatever way this run leaves, it concludes, so the panel is never left busy
         defer { conclude() }
 
-        outer: for group in groups {
+        var ready: [RestoreGroup] = []
+        // consent stays sequential so permission dialogs never compete
+        for group in groups {
             let actionable = group.windows.filter(\.isActionable)
             guard !actionable.isEmpty else { continue }
             if cancelRequested { break }
@@ -124,22 +138,48 @@ final class RestoreCoordinator {
                 }
             }
 
-            for window in actionable {
-                if cancelRequested { break outer }
-                if let blocked {
+            if let blocked {
+                for window in actionable {
                     finish(window.id, state: .failed, summary: blocked, items: plannedItems(window, state: .skipped, detail: blocked))
-                    continue
                 }
-                await perform(window, group: group, plan: plan, executor: executor)
+            } else {
+                ready.append(group)
             }
         }
+        // keep one lane per application even if a plan contains split groups
+        var lanes: [[RestoreGroup]] = []
+        var laneIndex: [String: Int] = [:]
+        for group in ready {
+            let key = group.bundleID ?? group.id
+            if let index = laneIndex[key] {
+                lanes[index].append(group)
+            } else {
+                laneIndex[key] = lanes.count
+                lanes.append([group])
+            }
+        }
+        let tasks = lanes.map { lane in
+            Task { @MainActor in
+                for group in lane {
+                    for window in group.windows where window.isActionable {
+                        guard !self.cancelRequested else { return }
+                        await self.perform(window, group: group, plan: plan, executor: executor)
+                    }
+                }
+            }
+        }
+        for task in tasks { await task.value }
         // every launch has been asked for by now, so this holds nothing up
         await placePending(plan: plan, executor: executor)
+        for task in placementTasks { await task.value }
+        placementTasks = []
     }
 
     private func prepare(_ plan: RestorePlan, groups: [RestoreGroup]) {
         cancelRequested = false
         pending = []
+        placementTasks = []
+        placementWindows = []
         planID = plan.id
         snapshotName = plan.snapshotName
         startedAt = Date()
@@ -196,7 +236,7 @@ final class RestoreCoordinator {
                        items: items,
                        evidence: reason)
                 log.record("reuse", "\(window.appName) window \(id) was already open, nothing was launched")
-                await applyLayout(window, windowID: id, plan: plan, executor: executor)
+                schedulePlacement(window, windowID: id, plan: plan, executor: executor)
                 return
             case .elsewhere(let reason):
                 let detail = "\(request.projectName) is already open outside the destination display. anchor left that window where it is and did not touch its editor state"
@@ -245,6 +285,7 @@ final class RestoreCoordinator {
         log.record("launch", outcome.succeeded
             ? "\(window.appName) took the open"
             : "\(window.appName) did not open anything")
+        if !outcome.succeeded { log.record("launch failure", outcome.summary) }
 
         var items = plannedItems(window, state: outcome.succeeded ? .opened : .failed, detail: nil)
         for (id, result) in outcome.items {
@@ -295,7 +336,7 @@ final class RestoreCoordinator {
                    state: .skipped)
             return
         }
-        await applyLayout(window, windowID: identified, plan: plan, executor: executor)
+        schedulePlacement(window, windowID: identified, plan: plan, executor: executor)
     }
 
     // a plain open that is worth placing later, kept until every launch has been asked for
@@ -346,7 +387,7 @@ final class RestoreCoordinator {
                 case .found(let id, let reason):
                     log.record("identify", "window \(id) for \(entry.window.appName)")
                     note(evidence: reason, on: entry.window.id)
-                    await applyLayout(entry.window, windowID: id, plan: plan, executor: executor)
+                    schedulePlacement(entry.window, windowID: id, plan: plan, executor: executor)
                 case .ambiguous(let reason):
                     log.record("place", "skipped, more than one window could be this one")
                     record(placement: reason, on: entry.window.id, state: .failed)
@@ -403,6 +444,24 @@ final class RestoreCoordinator {
         reports[index].evidence = evidence
     }
 
+    private func schedulePlacement(_ window: RestorePlanWindow,
+                                   windowID: CGWindowID,
+                                   plan: RestorePlan,
+                                   executor: RestoreExecutor) {
+        guard placementWindows.insert(windowID).inserted else {
+            record(placement: "another saved window already claimed this live window, so no second placement was attempted",
+                   on: window.id, state: .failed)
+            return
+        }
+        placementTasks.append(Task { @MainActor in
+            guard !self.cancelRequested else {
+                self.record(placement: "placement cancelled before it started", on: window.id, state: .skipped)
+                return
+            }
+            await self.applyLayout(window, windowID: windowID, plan: plan, executor: executor)
+        })
+    }
+
     // only a window this operation created, or one confidently reused on the destination,
     // is ever moved, and never one the application put on another display
     private func applyLayout(_ window: RestorePlanWindow,
@@ -431,7 +490,7 @@ final class RestoreCoordinator {
         }
         let outcome = await executor.place(windowID: windowID, appKitFrame: frame)
         guard case .applied = outcome else {
-            log.record("place", "window \(windowID) refused")
+            log.record("place", "window \(windowID): \(outcome.label)")
             record(placement: outcome.label, on: window.id, state: .failed)
             return
         }

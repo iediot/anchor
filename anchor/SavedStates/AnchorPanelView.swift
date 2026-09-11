@@ -26,17 +26,22 @@ struct AnchorPanelView: View {
     @State private var tileRect: CGRect = .zero
     @State private var detailRect: CGRect = .zero
     @State private var transitionComplete = true
+    // what the grid's scrolling region and the anchor in the strip say to each other
+    @State private var scroll = GridScroll()
 
     var body: some View {
         HStack(spacing: 0) {
             column
                 .frame(width: PanelMetrics.contentWidth)
-            // kept clear for the anchor decoration that lands here later
+            // the strip the anchor hangs in, kept clear of the content
             Color.clear
                 .frame(width: PanelMetrics.decorationStrip)
         }
         .frame(width: PanelMetrics.width)
         .coordinateSpace(.named(PanelSpace.panel))
+        // an overlay, so the strip is offered the panel's own height and adds none of
+        // its own to it
+        .overlay(alignment: .trailing) { anchorStrip }
         .overlay(alignment: .topLeading) { travellingPreview }
         .clipShape(RoundedRectangle(cornerRadius: 12))
         // a travel that never gets its landing rectangle must not hold the buttons back
@@ -47,6 +52,16 @@ struct AnchorPanelView: View {
             travelling = nil
             transitionComplete = true
         }
+    }
+
+    // the anchor and its chain, the grid's scrollbar while the grid is the screen and
+    // decoration everywhere else
+    private var anchorStrip: some View {
+        AnchorChainStrip(scroll: scroll,
+                         opening: model.openings,
+                         column: model.chainColumn,
+                         interactive: gridShowing)
+            .frame(width: AnchorArt.drawingWidth)
     }
 
     // the copy in flight, outside both scroll views so nothing clips it
@@ -152,6 +167,11 @@ struct AnchorPanelView: View {
         return false
     }
 
+    // only the grid has scrolling for the anchor to stand for
+    private var gridShowing: Bool {
+        !model.browserDisclosurePending && isHome
+    }
+
     // the grid and the layout screen share one box and one transition
     private var showsLayoutScreen: Bool {
         if model.browserDisclosurePending { return false }
@@ -214,18 +234,19 @@ struct AnchorPanelView: View {
         case .preview:
             RestorePreviewView(model: model)
         case .operation:
-            RestoreProgressView(model: model)
+            home
         case .replacement:
-            ReplacementProgressView(model: model)
+            if model.replacement.stage == .awaitingCaptureDecision {
+                ReplacementProgressView(model: model)
+            } else {
+                home
+            }
         }
     }
 
     private var home: some View {
         VStack(alignment: .leading, spacing: 0) {
             notices
-            if let id = model.renaming {
-                renameRow(id).padding(.bottom, 8)
-            }
             grid
         }
     }
@@ -235,13 +256,12 @@ struct AnchorPanelView: View {
     private var aboveGridReserve: CGFloat {
         var total: CGFloat = 0
         if showsNotices { total += 34 }
-        if model.renaming != nil { total += 62 }
         return total
     }
 
     private var showsNotices: Bool {
         model.storeError != nil || model.deleteError != nil
-            || model.replacement.isRunning || model.restore.isRunning
+            || model.replacement.stage == .awaitingCaptureDecision
     }
 
     // everything that is not a saved layout, kept to one compact block above the grid
@@ -265,33 +285,42 @@ struct AnchorPanelView: View {
     }
 
     private var grid: some View {
-        let rows = tileRows
+        let cards = model.oldestFirst
+        // the cards sit in the room above the footer. while they fit there the region
+        // neither scrolls nor bounces, and they start at the top on the same padding the
+        // first card has on its left. the newest end is only scrolled to once there is an
+        // end that is off screen
         return PanelScroll(maxHeight: max(PanelMetrics.gridHeight(rows: 1),
                                           PanelMetrics.panelHeight - aboveGridReserve),
-                           initialHeight: PanelMetrics.gridHeight(rows: min(max(rows.count, 1), PanelMetrics.visibleRows)),
-                           revealBottom: $model.revealNewest) {
+                           revealBottom: $model.revealNewest,
+                           fillsItsBox: true,
+                           bottomClearance: PanelMetrics.footerHeight,
+                           scroll: scroll) {
             // a plain stack, because a lazy one has no reliable height to measure
             VStack(alignment: .leading, spacing: PanelMetrics.tileSpacing) {
-                if rows.isEmpty && model.failures.isEmpty {
+                if cards.isEmpty && model.failures.isEmpty {
                     Text("No anchor points yet.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(alignment: .top, spacing: PanelMetrics.tileSpacing) {
-                        ForEach(row) { snapshot in
-                            SavedLayoutTile(snapshot: snapshot,
-                                            model: model,
-                                            previewHidden: travelling?.id == snapshot.id,
-                                            onOpen: { frame in openLayout(snapshot, from: frame) })
-                                .id(PanelScrollAnchor.tile(snapshot.id))
-                        }
-                        // a short row keeps its cards at column width
-                        ForEach(0..<(PanelMetrics.columns - row.count), id: \.self) { _ in
-                            Color.clear.frame(width: PanelMetrics.tileWidth, height: 1)
-                        }
+                // one container for every card, so a card whose row changes travels there
+                // rather than being taken out of one stack and put into another
+                TileGrid(columns: PanelMetrics.columns,
+                         spacing: PanelMetrics.tileSpacing,
+                         size: CGSize(width: PanelMetrics.tileWidth, height: PanelMetrics.tileHeight)) {
+                    ForEach(cards) { snapshot in
+                        SavedLayoutTile(snapshot: snapshot,
+                                        model: model,
+                                        previewHidden: travelling?.id == snapshot.id,
+                                        onOpen: { frame in openLayout(snapshot, from: frame) })
+                            .id(PanelScrollAnchor.tile(snapshot.id))
+                            // a new card fades in, a deleted one goes at once, because the
+                            // gap has to close while the others move rather than after
+                            .transition(.asymmetric(insertion: .opacity.combined(with: .scale(scale: 0.92)),
+                                                    removal: .identity))
                     }
                 }
+                .animation(PanelMotion.grid(reduceMotion), value: cards.map(\.id))
                 ForEach(model.failures) { failure in
                     VStack(alignment: .leading, spacing: 2) {
                         Text(failure.header?.name ?? failure.fileName).font(.caption)
@@ -301,62 +330,18 @@ struct AnchorPanelView: View {
                 }
             }
             .padding(PanelMetrics.gridPadding)
-            .padding(.bottom, PanelMetrics.footerHeight / 2)
         }
-    }
-
-    // oldest first, and the full rows sit at the bottom, so the short row is the top one
-    private var tileRows: [[Snapshot]] {
-        let cards = model.oldestFirst
-        guard !cards.isEmpty else { return [] }
-        let columns = PanelMetrics.columns
-        var rows: [[Snapshot]] = []
-        var index = cards.count % columns
-        if index > 0 { rows.append(Array(cards[0..<index])) }
-        while index < cards.count {
-            rows.append(Array(cards[index..<min(index + columns, cards.count)]))
-            index += columns
-        }
-        return rows
-    }
-
-    private func renameRow(_ id: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Name this layout").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
-                TextField("Name", text: $model.draftName)
-                    .textFieldStyle(.roundedBorder)
-                Button("Save") { model.commitRename() }
-                Button("Cancel") { model.cancelRename() }
-                    .buttonStyle(.link)
-            }
-            if let error = model.renameError {
-                Text(error).font(.caption2).foregroundStyle(.orange)
-            }
-        }
-        .padding(8)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-        .frame(maxWidth: 420, alignment: .leading)
-        .padding(.horizontal, PanelMetrics.gridPadding)
     }
 
     // the way back into an operation that is still going, including one waiting on a
     // decision, a finished one is not something the grid carries
     @ViewBuilder
     private var runningLink: some View {
-        if model.replacement.isRunning {
+        if model.replacement.stage == .awaitingCaptureDecision {
             Button {
                 model.show(.replacement)
             } label: {
-                Label("Switching in progress…", systemImage: "arrow.triangle.swap")
-                    .font(.caption)
-            }
-            .buttonStyle(.link)
-        } else if model.restore.isRunning {
-            Button {
-                model.show(.operation)
-            } label: {
-                Label("Opening in progress…", systemImage: "arrow.uturn.up")
+                Label("Switch paused — review incomplete save", systemImage: "exclamationmark.triangle")
                     .font(.caption)
             }
             .buttonStyle(.link)
@@ -526,6 +511,8 @@ struct SavedLayoutTile: View {
     var onOpen: (CGRect) -> Void = { _ in }
 
     @State private var previewFrame: CGRect = .zero
+    @FocusState private var nameFocused: Bool
+    private var isRenaming: Bool { model.renaming == snapshot.id }
 
     var body: some View {
         // the menu is drawn above the tile, so a click on it never reaches the tile
@@ -546,10 +533,32 @@ struct SavedLayoutTile: View {
                         previewFrame = frame
                     }
                 HStack(spacing: 2) {
-                    Text(SavedStatesFormat.displayName(snapshot))
-                        .font(.caption)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
+                    if isRenaming {
+                        TextField(SavedStatesFormat.displayName(snapshot), text: $model.draftName)
+                            .textFieldStyle(.plain)
+                            .font(.caption)
+                            .focused($nameFocused)
+                            .onSubmit { model.commitRename() }
+                            .onExitCommand { model.cancelRename() }
+                            .accessibilityLabel("Layout name")
+                            .help(model.renameError ?? "Return to save, Escape to cancel")
+                            .overlay(alignment: .bottom) {
+                                Path { path in
+                                    path.move(to: .zero)
+                                    path.addLine(to: CGPoint(x: PanelMetrics.tileWidth, y: 0))
+                                }
+                                    .stroke(model.renameError == nil ? Color.primary.opacity(0.3) : Color.orange,
+                                            style: StrokeStyle(lineWidth: 1, lineCap: .round, dash: [0.1, 3]))
+                                    .frame(height: 1)
+                                    .clipped()
+                                    .offset(y: 1)
+                            }
+                    } else {
+                        Text(SavedStatesFormat.displayName(snapshot))
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
                     if snapshot.completeness != .complete {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 8))
@@ -558,16 +567,32 @@ struct SavedLayoutTile: View {
                     }
                     Spacer(minLength: 18)
                 }
+                .frame(height: 14)
             }
             .frame(width: PanelMetrics.tileWidth, height: PanelMetrics.tileHeight, alignment: .topLeading)
             .contentShape(Rectangle())
-            .onTapGesture { onOpen(previewFrame) }
+            .onTapGesture {
+                guard !isRenaming else { return }
+                if model.renaming != nil {
+                    model.cancelRename()
+                }
+                onOpen(previewFrame)
+            }
             .help(SavedStatesFormat.displayName(snapshot))
 
             menu
                 .padding(.top, PanelMetrics.tileThumbnailHeight + 2)
         }
         .frame(width: PanelMetrics.tileWidth, height: PanelMetrics.tileHeight)
+        .task(id: isRenaming) {
+            guard isRenaming else { return }
+            await Task.yield()
+            guard !Task.isCancelled, isRenaming else { return }
+            nameFocused = true
+        }
+        .onChange(of: nameFocused) { _, focused in
+            if !focused && isRenaming { model.cancelRename() }
+        }
     }
 
     private var menu: some View {

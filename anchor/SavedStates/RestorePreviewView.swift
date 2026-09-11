@@ -148,6 +148,18 @@ enum PanelMotion {
     static func crossfade(_ reduceMotion: Bool) -> Animation {
         .easeInOut(duration: reduceMotion ? 0.18 : 0.25)
     }
+
+    // the anchor dropping down its chain when the panel opens, settling with a small
+    // bounce a little under half a second in
+    static let anchorDrop = Animation.spring(response: 0.42, dampingFraction: 0.86)
+
+    // the cards moving to where they belong after one is saved or deleted
+    // with reduce motion they still move, they just do not spring
+    static func grid(_ reduceMotion: Bool) -> Animation {
+        reduceMotion
+            ? .easeInOut(duration: 0.18)
+            : .spring(response: 0.34, dampingFraction: 0.82)
+    }
 }
 
 // one coordinate space for the panel, so a card and the layout screen can be measured

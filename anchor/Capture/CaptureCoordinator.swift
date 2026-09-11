@@ -7,8 +7,7 @@ enum CaptureCoordinator {
     struct Options {
         var includeBrowserTabs: Bool
         var name: String?
-        // only a save a person asked for takes a picture of the screen
-        // a save on the way out of a switch, and every restore, leaves the screen alone
+        // manual saves and save then switch opt in before any windows close
         var captureThumbnail = false
     }
 

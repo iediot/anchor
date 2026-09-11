@@ -232,7 +232,36 @@ struct LiveRestoreExecutor: RestoreExecutor {
     }
 
     func place(windowID: CGWindowID, appKitFrame: CGRect) async -> PlacementOutcome {
-        WindowPlacement.place(windowID: windowID, appKitFrame: appKitFrame)
+        let result = WindowPlacement.place(windowID: windowID, appKitFrame: appKitFrame)
+        guard !result.succeeded,
+              LayoutMapping.finite(appKitFrame), appKitFrame.width > 0, appKitFrame.height > 0,
+              let owner = WindowPlacement.serverFrame(ofWindow: windowID),
+              NSRunningApplication(processIdentifier: owner.pid)?.bundleIdentifier == IntegrationKind.terminal.bundleID
+        else { return result }
+
+        // terminal also exposes bounds by window id when accessibility refuses a move
+        let rect = ScreenGeometry.windowServer(fromAppKit: appKitFrame)
+        let reply = await ScriptRunner.shared.runHandler(
+            RestoreScripts.terminalPlacement, handler: RestoreScripts.handler,
+            arguments: [.integer(Int(windowID)), .integer(Int(rect.minX.rounded())),
+                        .integer(Int(rect.minY.rounded())), .integer(Int(rect.maxX.rounded())),
+                        .integer(Int(rect.maxY.rounded()))])
+        guard case .value(let value) = reply, value.text == "ok" else {
+            return .refused("\(result.label); terminal bounds fallback: \(reply.failureDescription ?? "the addressed window refused its bounds")")
+        }
+        for _ in 0..<10 {
+            guard let current = WindowPlacement.serverFrame(ofWindow: windowID), current.pid == owner.pid else {
+                return .unavailable("the terminal window disappeared or changed owner during placement")
+            }
+            let actual = ScreenGeometry.appKit(fromWindowServer: current.frame)
+            // terminal rounds its dimensions to whole character cells
+            if abs(actual.minX - appKitFrame.minX) < 3 && abs(actual.minY - appKitFrame.minY) < 3 {
+                return .applied(requested: appKitFrame, actual: actual,
+                                adjustment: LayoutMapping.describeAdjustment(requested: appKitFrame, actual: actual))
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        return .refused("terminal accepted bounds but its window did not settle at the requested position")
     }
 
     // an id an app reports is usable only where anchor has established it is the window
@@ -369,27 +398,38 @@ enum RestoreScripts {
     static let terminal = """
     on anchoropen(pvcommand)
         tell application "Terminal"
-            set pvbefore to {}
-            repeat with pvw in windows
-                try
-                    set end of pvbefore to (id of pvw) as text
-                end try
-            end repeat
             try
-                do script pvcommand
+                set pvopened to do script pvcommand
             on error pverr
                 return {"error", "", pverr, {}}
             end try
-            set pvtarget to ""
-            repeat with pvw in windows
-                set pvthis to ""
+            repeat 20 times
                 try
-                    set pvthis to (id of pvw) as text
+                    set pvtty to tty of pvopened
+                    if pvtty is not "" then
+                        repeat with pvw in windows
+                            repeat with pvtab in tabs of pvw
+                                if (tty of pvtab) is pvtty then
+                                    return {"ok", (id of pvw) as text, "", {"ok"}}
+                                end if
+                            end repeat
+                        end repeat
+                    end if
                 end try
-                if pvthis is not "" and pvbefore does not contain pvthis then set pvtarget to pvthis
+                delay 0.1
             end repeat
-            if pvtarget is "" then return {"error", "", "the new window could not be identified", {}}
-            return {"ok", pvtarget, "", {"ok"}}
+            return {"ok", "", "the shell opened but its window could not be identified", {"ok"}}
+        end tell
+    end anchoropen
+    """
+
+    static let terminalPlacement = """
+    on anchoropen(pvid, pvleft, pvtop, pvright, pvbottom)
+        if application "Terminal" is not running then return "unavailable"
+        tell application "Terminal"
+            if not (exists window id pvid) then return "unavailable"
+            set bounds of window id pvid to {pvleft, pvtop, pvright, pvbottom}
+            return "ok"
         end tell
     end anchoropen
     """

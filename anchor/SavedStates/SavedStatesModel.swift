@@ -31,6 +31,12 @@ final class SavedStatesModel {
     // asked for when the panel opens on the grid and after a save, so the newest cards
     // and the save tile are in view, cleared by the grid once it has scrolled
     var revealNewest = false
+    // counted up by the presenter for each actual opening of the panel, so the anchor
+    // drops once per opening and not for a reload, a save or a trip to a card
+    var openings = 0
+    // where the ring left in the menu bar falls across the panel, set by the presenter
+    // from the placement it has just worked out, so the chain hangs under it
+    var chainColumn: CGFloat = PanelMetrics.chainColumn
 
     var route: PanelRoute = .home
     let restore: RestoreCoordinator
@@ -138,6 +144,24 @@ final class SavedStatesModel {
         if case .detail(let id) = route { select(id) }
     }
 
+    // a run that finished and left nothing to read has nothing to come back to, so the
+    // next opening of the panel starts at the grid
+    // a failure, a partial result or a cancelled run keeps its report until it is left by
+    // hand, and a run that is still going is never moved out from under itself
+    func settleFinishedOperation() {
+        guard !busy else { return }
+        switch route {
+        case .operation where restore.fullySucceeded:
+            route = .home
+        case .replacement where replacement.fullySucceeded:
+            route = .home
+        default:
+            return
+        }
+        plan = nil
+        previewTicket += 1
+    }
+
     func backToHome() {
         // any reading still in flight belongs to the screen that was just left
         previewTicket += 1
@@ -207,6 +231,8 @@ final class SavedStatesModel {
         Task { await replace(mode) }
     }
 
+    @ObservationIgnored var dismissForOperation: () -> Void = {}
+
     // the preview is the confirmation, and the coordinator checks the screen again itself
     // before it saves or closes anything
     func replace(_ mode: ReplacementCoordinator.Mode) async {
@@ -215,7 +241,8 @@ final class SavedStatesModel {
               let environment,
               let snapshot = snapshots.first(where: { $0.id == current.snapshotID })
         else { return }
-        route = .replacement
+        dismissForOperation()
+        route = .home
         await replacement.run(mode: mode,
                               plan: current,
                               services: services(),
@@ -228,10 +255,12 @@ final class SavedStatesModel {
         await replacement.beginPreflight(plan: rebuilt, services: services())
         planning = false
         planRebuiltNotice = "the screen changed, so anchor stopped and read it again. check this preview and confirm once more"
-        route = .preview
+        route = .home
     }
 
     func requestPartialCaptureDecision() {
+        dismissForOperation()
+        route = .home
         Task {
             await replacement.continueAfterPartialCapture()
             reload()
@@ -267,7 +296,8 @@ final class SavedStatesModel {
         }
         guard let environment else { return }
         planRebuiltNotice = nil
-        route = .operation
+        dismissForOperation()
+        route = .home
         await restore.run(plan: current, executor: LiveRestoreExecutor(environment: environment))
     }
 
@@ -285,6 +315,9 @@ final class SavedStatesModel {
 
     func beginRename(_ id: String) {
         guard !busy else { return }
+        if let renaming, renaming != id {
+            cancelRename()
+        }
         select(id)
         renaming = id
         confirmingDelete = nil
@@ -397,6 +430,8 @@ final class SavedStatesModel {
         if let saved = outcome.snapshot {
             select(saved.id)
             revealNewest = true
+            renaming = saved.id
+            confirmingDelete = nil
         }
     }
 

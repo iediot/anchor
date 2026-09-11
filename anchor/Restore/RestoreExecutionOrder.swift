@@ -1,10 +1,8 @@
 import Foundation
 
-// quick things first
-// the coordinator opens one window at a time and an ide is seconds away from being
-// ready, so a browser window should not wait behind it
+// quick apps are scheduled first but do not wait for other apps to finish
 enum RestoreExecutionOrder {
-    static let note = "anchor opens plain applications first, then browser windows, then terminals, then projects and ides, so a slow ide start cannot hold up the quick ones"
+    static let note = "anchor opens different applications concurrently, keeping windows within each application sequential"
 
     enum Tier: Int, Comparable {
         // a plain open waits for nothing at all, so it never holds anything up

@@ -14,6 +14,13 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
     private var panel: AnchorPanel?
     private var setupWindow: NSWindow?
     private var outsideClick: Any?
+    private var renameClick: Any?
+    // the two faces of the icon: the anchor while the panel is shut, and the ring it
+    // leaves behind while the panel is open and the anchor is hanging in it
+    private var restingIcon: NSImage?
+    private var openIcon: NSImage?
+    private var appearanceObservation: NSKeyValueObservation?
+    private var chainBridge: NSPanel?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -21,7 +28,9 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
         // black in light appearance and white in dark appearance
         if let image = NSImage(named: "MenuBarAnchor") {
             image.isTemplate = true
-            image.size = NSSize(width: 18, height: 18)
+            image.size = NSSize(width: AnchorArt.box, height: AnchorArt.box)
+            restingIcon = image
+            openIcon = Self.chainRingIcon()
             item.button?.image = image
         } else {
             item.button?.title = "Anchor"
@@ -30,6 +39,14 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
         item.button?.action = #selector(toggle)
         item.button?.setAccessibilityLabel("Anchor")
         statusItem = item
+        savedStates.dismissForOperation = { [weak self] in self?.close() }
+        refreshIcon()
+        appearanceObservation = item.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                self?.refreshIcon()
+                if let panel = self?.panel, panel.isVisible { self?.place(panel) }
+            }
+        }
 
         // an open panel belongs to this application, so a click anywhere else closes it
         NotificationCenter.default.addObserver(self,
@@ -53,30 +70,47 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
     }
 
     func open() {
+        savedStates.backToHome()
         // opening the panel while something is running must not re-read the screen
         // underneath that operation
         if !savedStates.busy {
             savedStates.reload()
             savedStates.resolveDestination()
             setup.refreshPermissions()
+            // a finished run that went through cleanly is not what the panel opens on
+            savedStates.settleFinishedOperation()
         }
         // a fresh opening of the grid starts at its newest end, anything else the panel
         // was left in keeps the place it was left at
         if savedStates.route == .home {
             savedStates.revealNewest = true
         }
+        // the decoration in the strip plays for the opening itself
+        savedStates.openings += 1
+        // the anchor has dropped into the panel, so the icon becomes the point its chain
+        // is made fast to, and stays that for as long as the panel is up
+        if let openIcon { statusItem?.button?.image = openIcon }
         let panel = panel ?? makePanel()
         self.panel = panel
         place(panel)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
+        refreshIcon()
         // again now that the panel is on screen at its real size
         place(panel)
         watchForOutsideClicks()
     }
 
     func close() {
+        if savedStates.renaming != nil { savedStates.cancelRename() }
+        if let renameClick {
+            NSEvent.removeMonitor(renameClick)
+            self.renameClick = nil
+        }
+        chainBridge?.orderOut(nil)
         panel?.orderOut(nil)
+        if let restingIcon { statusItem?.button?.image = restingIcon }
+        refreshIcon()
         if let outsideClick {
             NSEvent.removeMonitor(outsideClick)
             self.outsideClick = nil
@@ -169,17 +203,127 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
         guard let usable = screen?.visibleFrame else { return }
         // moving it to where it already is would start another layout pass for nothing
         let target = PanelPlacement.origin(anchor: anchor, size: panel.frame.size, usable: usable)
-        guard panel.frame.origin != target else { return }
-        panel.setFrameOrigin(target)
+        // the icon's slot is symmetric around it, and the artwork's ring is a shade right
+        // of the middle of its box. the chain hangs under that, wherever the panel landed
+        let column = anchor.midX + AnchorArt.ringOffset - target.x
+        if abs(savedStates.chainColumn - column) > 0.5 {
+            savedStates.chainColumn = column
+        }
+        if panel.frame.origin != target { panel.setFrameOrigin(target) }
+        if panel.isVisible { placeChainBridge(panel, button: button, column: column) }
+    }
+
+    private func placeChainBridge(_ panel: NSPanel, button: NSStatusBarButton, column: CGFloat) {
+        guard let window = button.window,
+              let imageRect = button.cell?.imageRect(forBounds: button.bounds) else { return }
+        let image = window.convertToScreen(button.convert(imageRect, to: nil))
+        let outlet = image.maxY - image.height * (AnchorArt.box / 2 + 1) / AnchorArt.box
+        let height = outlet - panel.frame.maxY
+        guard height > 0 else { chainBridge?.orderOut(nil); return }
+        let bridge: NSPanel
+        if let existing = chainBridge {
+            bridge = existing
+        } else {
+            bridge = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                             backing: .buffered, defer: false)
+            bridge.isOpaque = false
+            bridge.backgroundColor = .clear
+            bridge.hasShadow = false
+            bridge.ignoresMouseEvents = true
+            bridge.hidesOnDeactivate = false
+            bridge.isReleasedWhenClosed = false
+            bridge.level = .statusBar
+            bridge.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            bridge.contentView = ChainBridgeView()
+            panel.addChildWindow(bridge, ordered: .above)
+            chainBridge = bridge
+        }
+        let width: CGFloat = 12
+        let x = panel.frame.minX + column - AnchorArt.nudge + AnchorArt.chainTrue
+        bridge.setFrame(CGRect(x: x - width / 2, y: panel.frame.maxY,
+                               width: width, height: height), display: false)
+        bridge.appearance = button.effectiveAppearance
+        bridge.contentView?.needsDisplay = true
+        bridge.orderFront(nil)
+    }
+
+    private func refreshIcon() {
+        guard let button = statusItem?.button,
+              let source = panel?.isVisible == true ? openIcon : restingIcon else { return }
+        source.isTemplate = true
+        button.image = source
+    }
+
+    // a small deck plate with an opening for the chain
+    private static func chainRingIcon() -> NSImage {
+        let side = AnchorArt.box
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: true) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return true }
+            context.setStrokeColor(NSColor.black.cgColor)
+            context.setLineWidth(1)
+            let plate = CGRect(x: AnchorArt.ringX - 6, y: side / 2 - 3,
+                               width: 12, height: 6)
+            context.addPath(CGPath(roundedRect: plate, cornerWidth: 2, cornerHeight: 2, transform: nil))
+            context.strokePath()
+            context.setFillColor(NSColor.black.cgColor)
+            let opening = CGRect(x: AnchorArt.ringX - 2.4, y: side / 2 - 1.5,
+                                 width: 4.8, height: 3)
+            context.addPath(CGPath(roundedRect: opening, cornerWidth: 1.5, cornerHeight: 1.5, transform: nil))
+            context.fillPath()
+            for x in [plate.minX + 1.5, plate.maxX - 1.5] {
+                context.fillEllipse(in: CGRect(x: x - 0.45, y: side / 2 - 0.45, width: 0.9, height: 0.9))
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     private func watchForOutsideClicks() {
+        if renameClick == nil {
+            renameClick = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, self.savedStates.renaming != nil else { return event }
+                    if event.window === self.panel,
+                       let editor = self.panel?.firstResponder as? NSTextView,
+                       editor.isFieldEditor,
+                       editor.bounds.contains(editor.convert(event.locationInWindow, from: nil)) {
+                        return event
+                    }
+                    self.savedStates.cancelRename()
+                    return event
+                }
+            }
+        }
         guard outsideClick == nil else { return }
         outsideClick = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.close() }
         }
     }
 }
+
+private final class ChainBridgeView: NSView {
+    override var isFlipped: Bool { true }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let period = (ChainMetrics.link.height - ChainMetrics.overlap) * 2
+        let lead = (ChainMetrics.link.height / 2 - bounds.height)
+            .truncatingRemainder(dividingBy: period)
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        context.setStrokeColor((dark ? NSColor.white : NSColor.black).cgColor)
+        context.setLineWidth(ChainMetrics.lineWidth)
+        context.setLineCap(.round)
+        context.addPath(ChainLinks(lead: lead < 0 ? lead + period : lead).path(in: bounds).cgPath)
+        context.strokePath()
+    }
+}
+
 
 // the reserved strip on the right ends up under the icon, with the icon roughly at its
 // middle, the rest of the panel hangs to the left and the whole of it stays on screen
