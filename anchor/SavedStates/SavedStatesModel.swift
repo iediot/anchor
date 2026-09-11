@@ -20,8 +20,15 @@ final class SavedStatesModel {
     private(set) var saving = false
     private(set) var lastOutcome: CaptureCoordinator.Outcome?
     private(set) var renameError: String?
+    private(set) var deleteError: String?
+    // the entry whose name is being edited, and the entry waiting for a delete confirmation
+    private(set) var renaming: String?
+    private(set) var confirmingDelete: String?
     var selectedID: String?
     var draftName: String = ""
+    // asked for when the panel opens on the grid and after a save, so the newest cards
+    // and the save tile are in view, cleared by the grid once it has scrolled
+    var revealNewest = false
 
     var route: PanelRoute = .home
     let restore: RestoreCoordinator
@@ -83,6 +90,14 @@ final class SavedStatesModel {
 
     var recent: [Snapshot] { Array(snapshots.prefix(8)) }
 
+    // the grid reads oldest first, left to right, while everything else keeps the
+    // newest first order the store loads
+    var oldestFirst: [Snapshot] {
+        snapshots.sorted { left, right in
+            left.createdAt == right.createdAt ? left.id < right.id : left.createdAt < right.createdAt
+        }
+    }
+
     func reload() {
         guard let store else { return }
         let loaded = store.loadAll()
@@ -105,6 +120,8 @@ final class SavedStatesModel {
     }
 
     func backToHome() {
+        // any reading still in flight belongs to the screen that was just left
+        previewTicket += 1
         route = .home
     }
 
@@ -117,20 +134,41 @@ final class SavedStatesModel {
         return DestinationDisplay(scan.target)
     }
 
+    // the route changes here rather than inside the task, so opening a layout is one
+    // state change a caller can animate
     func requestPreview(for id: String) {
-        guard !busy else { return }
+        guard !busy, snapshots.contains(where: { $0.id == id }) else { return }
+        select(id)
+        plan = nil
+        route = .preview
         Task { await preparePreview(for: id) }
+    }
+
+    // a reading that is no longer the one on screen must not move the panel or write
+    // over another selection, so every reading carries the ticket it started with
+    private var previewTicket = 0
+
+    private func openPreviewTicket() -> Int {
+        previewTicket += 1
+        return previewTicket
+    }
+
+    private func previewIsCurrent(_ ticket: Int, _ id: String) -> Bool {
+        ticket == previewTicket && selectedID == id && route == .preview
     }
 
     func preparePreview(for id: String) async {
         guard !busy, let snapshot = snapshots.first(where: { $0.id == id }) else { return }
+        let ticket = openPreviewTicket()
         planning = true
         defer { planning = false }
         select(id)
         route = .preview
+        plan = nil
         planError = nil
         planRebuiltNotice = nil
         let built = await buildPlan(snapshot)
+        guard previewIsCurrent(ticket, id) else { return }
         plan = built
         await replacement.beginPreflight(plan: built, services: services())
     }
@@ -245,6 +283,76 @@ final class SavedStatesModel {
         await restore.run(plan: current, executor: LiveRestoreExecutor(environment: environment))
     }
 
+    // the snapshot a run is built on, so its entry cannot be deleted underneath it
+    var operationSnapshotID: String? {
+        guard restore.isRunning || replacement.isRunning || replacement.stage == .awaitingCaptureDecision else {
+            return nil
+        }
+        return plan?.snapshotID
+    }
+
+    func canDelete(_ id: String) -> Bool {
+        !busy && operationSnapshotID != id
+    }
+
+    func beginRename(_ id: String) {
+        guard !busy else { return }
+        select(id)
+        renaming = id
+        confirmingDelete = nil
+    }
+
+    func cancelRename() {
+        renaming = nil
+        renameError = nil
+        syncDraftName()
+    }
+
+    func commitRename() {
+        renameSelected()
+        guard renameError == nil else { return }
+        renaming = nil
+    }
+
+    func requestDelete(_ id: String) {
+        guard canDelete(id) else { return }
+        confirmingDelete = id
+        renaming = nil
+        deleteError = nil
+    }
+
+    func cancelDelete() {
+        confirmingDelete = nil
+        deleteError = nil
+    }
+
+    // the identifier is what the store resolves, never a name, and only the one
+    // snapshot file moves, anything the snapshot refers to is left alone
+    func confirmDelete(_ id: String) {
+        guard let store, canDelete(id) else { return }
+        do {
+            try store.trash(id: id)
+        } catch {
+            // the entry stays in the list, the failure is the only thing that changed
+            deleteError = error.localizedDescription
+            return
+        }
+        deleteError = nil
+        confirmingDelete = nil
+        if renaming == id { renaming = nil }
+        if plan?.snapshotID == id { plan = nil }
+        reload()
+        if routeTargets(id) { route = .home }
+    }
+
+    private func routeTargets(_ id: String) -> Bool {
+        switch route {
+        case .detail(let shown): return shown == id
+        case .preview: return true
+        default: return false
+        }
+    }
+
     func syncDraftName() {
         draftName = selected?.name ?? ""
         renameError = nil
@@ -289,6 +397,7 @@ final class SavedStatesModel {
         reload()
         if let saved = outcome.snapshot {
             select(saved.id)
+            revealNewest = true
         }
     }
 

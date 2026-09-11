@@ -60,64 +60,56 @@ struct OutgoingScopeView: View {
     }
 }
 
-// the confirmation, and the only place a replacement starts
+// why a switch is refused, read by the buttons and by the screen that shows them
+@MainActor
+enum SwitchBlocker {
+    // what this operation would actually reopen, after anything the user left out
+    static func incomingCount(model: SavedStatesModel, plan: RestorePlan) -> Int {
+        plan.excluding(windowIDs: model.replacement.excludedIncoming).actionableWindowCount
+    }
+
+    static func ready(model: SavedStatesModel, plan: RestorePlan) -> Bool {
+        !model.busy && model.replacement.canConfirm && incomingCount(model: model, plan: plan) > 0
+    }
+
+    static func reason(model: SavedStatesModel, plan: RestorePlan) -> String? {
+        guard let preflight = model.replacement.preflight else { return nil }
+        if !preflight.accessibilityGranted {
+            return "grant accessibility before switching, anchor cannot close a window without it"
+        }
+        let stuck = preflight.blocking(excluding: model.replacement.excludedOutgoing)
+        if !stuck.isEmpty {
+            return "keep \(stuck.count) windows open, or anchor cannot call this a switch. it never quits an application to close a window"
+        }
+        if incomingCount(model: model, plan: plan) == 0 {
+            return "there is nothing to open from this saved state, so anchor will not close anything. this is what a state saved on an ide welcome screen looks like"
+        }
+        return nil
+    }
+}
+
+// the three things that can be done with a saved state, and the only place a
+// replacement starts
 struct ReplacementConfirmView: View {
     @Bindable var model: SavedStatesModel
     let plan: RestorePlan
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let blocker {
-                Text(blocker).font(.caption2).foregroundStyle(.orange)
-            }
-            Button("Save Current State, Then Replace") {
-                model.requestReplacement(.saveThenReplace)
-            }
-            .keyboardShortcut(.defaultAction)
-            .frame(maxWidth: .infinity)
-            .disabled(!ready)
-            Button("Replace Without Saving") {
-                model.requestReplacement(.replaceWithoutSaving)
-            }
-            .frame(maxWidth: .infinity)
-            .disabled(!ready)
-            Button("Cancel") { model.show(.detail(plan.snapshotID)) }
-                .buttonStyle(.link)
-                .frame(maxWidth: .infinity)
-            #if DEBUG
-            Button("Development: reopen without closing anything") { model.requestExecute() }
-                .buttonStyle(.link)
-                .font(.caption2)
-                .frame(maxWidth: .infinity)
+        HStack(spacing: 6) {
+            Button("Open Alongside") { model.requestExecute() }
                 .disabled(model.busy || plan.actionableWindowCount == 0)
-            #endif
+                .help("Opens the saved layout and closes nothing")
+            Button("Save & Switch") { model.requestReplacement(.saveThenReplace) }
+                .disabled(!ready)
+            Button("Switch Without Saving") { model.requestReplacement(.replaceWithoutSaving) }
+                .disabled(!ready)
+            Spacer(minLength: 0)
         }
-        .padding(14)
+        .font(.caption)
+        .controlSize(.small)
     }
 
-    // what this operation would actually reopen, after anything the user left out
-    private var incomingCount: Int {
-        plan.excluding(windowIDs: model.replacement.excludedIncoming).actionableWindowCount
-    }
-
-    private var ready: Bool {
-        !model.busy && model.replacement.canConfirm && incomingCount > 0
-    }
-
-    private var blocker: String? {
-        guard let preflight = model.replacement.preflight else { return nil }
-        if !preflight.accessibilityGranted {
-            return "grant accessibility before replacing, anchor cannot close a window without it"
-        }
-        let stuck = preflight.blocking(excluding: model.replacement.excludedOutgoing)
-        if !stuck.isEmpty {
-            return "keep \(stuck.count) windows open, or anchor cannot call this a replacement. it never quits an application to close a window"
-        }
-        if incomingCount == 0 {
-            return "there is nothing to reopen from this saved state, so anchor will not close anything. this is what a state saved on an ide welcome screen looks like"
-        }
-        return nil
-    }
+    private var ready: Bool { SwitchBlocker.ready(model: model, plan: plan) }
 }
 
 func copy(_ text: String) {

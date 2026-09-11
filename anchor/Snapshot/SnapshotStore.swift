@@ -7,6 +7,7 @@ nonisolated enum SnapshotStoreError: LocalizedError {
     case writeFailed(String)
     case alreadyExists(String)
     case notFound(String)
+    case trashFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -15,6 +16,7 @@ nonisolated enum SnapshotStoreError: LocalizedError {
         case .writeFailed(let detail): return "the snapshot could not be written: \(detail)"
         case .alreadyExists(let id): return "a snapshot with identifier \(id) already exists and was not overwritten"
         case .notFound(let id): return "no snapshot with identifier \(id) is stored"
+        case .trashFailed(let detail): return "the saved layout could not be moved to the trash: \(detail)"
         }
     }
 }
@@ -77,6 +79,25 @@ nonisolated final class SnapshotStore {
             throw SnapshotStoreError.notFound(snapshot.id)
         }
         try write(snapshot, replacingExisting: true)
+    }
+
+    // the one file of this snapshot goes to the trash, nothing else is touched
+    // the identifier is resolved into a file name here, so a name a user typed can
+    // never reach the filesystem, and nothing a snapshot refers to is ever deleted
+    @discardableResult
+    func trash(id: String) throws -> URL? {
+        guard Self.isSafeIdentifier(id) else { throw SnapshotStoreError.invalidIdentifier(id) }
+        let url = fileURL(for: id)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw SnapshotStoreError.notFound(id)
+        }
+        var moved: NSURL?
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: &moved)
+        } catch {
+            throw SnapshotStoreError.trashFailed(error.localizedDescription)
+        }
+        return moved as URL?
     }
 
     func loadAll() -> (snapshots: [Snapshot], failures: [SnapshotLoadFailure]) {

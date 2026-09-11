@@ -1,7 +1,7 @@
 import SwiftUI
 
-// one saved state inside the panel
-// reopening is never started from here, it goes through the preview first
+// everything anchor recorded for one saved state, reached from the layout screen
+// nothing is ever started from here, the actions live on the layout screen
 struct SnapshotDetailView: View {
     let snapshot: Snapshot
     @Bindable var model: SavedStatesModel
@@ -12,11 +12,11 @@ struct SnapshotDetailView: View {
             Button {
                 model.requestPreview(for: snapshot.id)
             } label: {
-                Label(model.planning ? "Reading…" : "Preview Reopening", systemImage: "eye")
+                Label(model.planning ? "Reading…" : "Back to the Layout", systemImage: "rectangle.3.group")
                     .frame(maxWidth: .infinity, alignment: .center)
             }
             .disabled(model.busy)
-            Text("The preview reads saved records and local paths only. Nothing is opened until you confirm it there.")
+            Text("This reads saved records and local paths only. Nothing is opened until you choose an action on the layout screen.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
 

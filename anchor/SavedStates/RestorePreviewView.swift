@@ -1,156 +1,158 @@
 import SwiftUI
 
-// the preview is the confirmation step
+// the layout screen of one saved state, inside the same box the grid fills
 // it reads a plan that has already been built and never starts anything by itself
 struct RestorePreviewView: View {
     @Bindable var model: SavedStatesModel
-    @State private var showAddresses = false
+    // the travelling copy stands in for this one while it is on its way here
+    var previewHidden = false
+    var transitionComplete = true
+    var onPreviewFrame: (CGRect) -> Void = { _ in }
+    var onBack: () -> Void = {}
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var actionsVisible = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if model.planning && model.plan == nil {
-                ProgressView("Reading the saved state")
-                    .padding(20)
-                    .frame(maxWidth: .infinity)
-            } else if let plan = model.plan {
-                PanelScroll(maxHeight: PanelMetrics.viewport(reserving: 260)) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        heading(plan)
-                        if let notice = model.planRebuiltNotice {
-                            Label(notice, systemImage: "arrow.clockwise")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        }
-                        destination(plan)
-                        notes(plan)
-                        Divider()
-                        Toggle("Show full addresses and paths", isOn: $showAddresses)
-                            .toggleStyle(.checkbox)
-                            .font(.caption)
-                        ForEach(plan.groups) { group in
-                            groupView(group)
-                        }
-                        Divider()
-                        OutgoingScopeView(model: model)
-                    }
-                    .padding(14)
-                    .textSelection(.enabled)
-                }
-                Divider()
-                actions(plan)
-            } else if let error = model.planError {
-                Text(error).font(.callout).foregroundStyle(.orange).padding(14)
-            }
+        VStack(alignment: .leading, spacing: 8) {
+            heading
+            middle
+            actions
         }
+        .padding(12)
+        .frame(width: PanelMetrics.contentWidth, height: PanelMetrics.panelHeight, alignment: .top)
     }
 
-    private func heading(_ plan: RestorePlan) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(plan.snapshotName ?? SavedStatesFormat.date(plan.snapshotCreatedAt))
-                .font(.headline)
-            Text(plan.headline).font(.caption).foregroundStyle(.secondary)
-            Text("saved \(SavedStatesFormat.date(plan.snapshotCreatedAt)) · \(SavedStatesFormat.completeness(plan.completeness))")
+    private var snapshot: Snapshot? { model.selected }
+
+    private var heading: some View {
+        HStack(spacing: 6) {
+            Button {
+                onBack()
+            } label: {
+                Image(systemName: "chevron.left").font(.caption)
+            }
+            .buttonStyle(.plain)
+            .help("Saved layouts")
+            Text(snapshot.map { SavedStatesFormat.displayName($0) } ?? "Saved layout")
+                .font(.callout)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+            if model.planning {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(height: 20)
+    }
+
+    private var middle: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if let snapshot {
+                    LayoutThumbnail(snapshot: snapshot,
+                                    fit: CGSize(width: PanelMetrics.contentWidth - 24,
+                                                height: PanelMetrics.detailMiddleHeight))
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .opacity(previewHidden ? 0 : 1)
+                        .onGeometryChange(for: CGRect.self) { proxy in
+                            proxy.frame(in: .named(PanelSpace.panel))
+                        } action: { frame in
+                            onPreviewFrame(frame)
+                        }
+                }
+                warnings
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(height: PanelMetrics.detailMiddleHeight)
+    }
+
+    // routine detail belongs to the record screen, what stays here is what a person has
+    // to act on before anything opens or closes
+    @ViewBuilder
+    private var warnings: some View {
+        if let notice = model.planRebuiltNotice {
+            note(notice, severity: .limitation)
+        }
+        if let error = model.planError {
+            note(error, severity: .blocker)
+        }
+        ForEach(actionableNotes) { item in
+            note(item.text, severity: item.severity)
+        }
+        // the reason a switch is refused, never left to a tooltip
+        if let plan = model.plan, let reason = SwitchBlocker.reason(model: model, plan: plan) {
+            note(reason, severity: .limitation)
+        }
+        // the only decision that cannot be skipped, shown when anchor cannot close
+        // something the switch would have to close
+        if requiresOutgoingChoice {
+            OutgoingScopeView(model: model)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
         }
     }
 
-    private func destination(_ plan: RestorePlan) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Destination: \(plan.destination.name)").font(.callout)
-            Text("chosen because: \(plan.destination.selectionSource)")
-            if let detail = plan.destination.selectionDetail {
-                Text("decided by: \(detail)").lineLimit(2)
-            }
-            Text("usable area \(RectRecord(plan.destination.visibleFrame).summary), saved on \(plan.source.name) with usable area \(plan.source.visibleFrame.summary)")
-        }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
+    private var actionableNotes: [PlanNote] {
+        (model.plan?.notes ?? []).filter { $0.severity != .note }
     }
 
-    private func notes(_ plan: RestorePlan) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            ForEach(plan.notes) { note in
-                Text(note.text)
-                    .font(.caption)
-                    .foregroundStyle(color(note.severity))
-            }
-        }
+    private var requiresOutgoingChoice: Bool {
+        guard let preflight = model.replacement.preflight else { return false }
+        return !preflight.blocking(excluding: model.replacement.excludedOutgoing).isEmpty
     }
 
-    private func color(_ severity: PlanNoteSeverity) -> Color {
-        switch severity {
-        case .note: return .secondary
-        case .limitation: return .orange
-        case .blocker: return .red
-        }
+    private func note(_ text: String, severity: PlanNoteSeverity) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle")
+            .font(.caption2)
+            .foregroundStyle(severity == .blocker ? Color.red : Color.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func groupView(_ group: RestoreGroup) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(group.appName).font(.callout).bold()
-                Text(group.appDetail).font(.caption2).foregroundStyle(.secondary)
-            }
-            ForEach(group.windows) { window in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Image(systemName: window.isActionable ? "macwindow.badge.plus" : "macwindow.badge.minus")
-                        Text(window.title ?? window.appName).lineLimit(1)
-                        Spacer()
-                        if window.isActionable {
-                            Toggle("Leave out", isOn: leaveOut(window))
-                                .toggleStyle(.checkbox)
-                                .font(.caption2)
-                                .disabled(model.busy)
-                        }
-                    }
-                    .font(.caption)
-                    Text(window.action.summary)
-                        .font(.caption2)
-                        .foregroundStyle(window.isActionable ? Color.secondary : Color.orange)
-                    if window.isActionable {
-                        Text(window.layout.summary).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    ForEach(window.items) { item in
-                        itemView(item)
-                    }
-                    ForEach(Array(window.limitations.enumerated()), id: \.offset) { _, note in
-                        Text("limitation: \(note)").font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.leading, 6)
+    // the buttons wait for the travel to land and for the screen to be read, and their
+    // row holds its height the whole time so nothing moves when they arrive
+    private var actions: some View {
+        Group {
+            if let plan = model.plan {
+                ReplacementConfirmView(model: model, plan: plan)
+            } else {
+                Color.clear
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func itemView(_ item: RestorePlanItem) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Image(systemName: item.status.isActionable ? "checkmark.circle" : "exclamationmark.circle")
-                    .foregroundStyle(item.status.isActionable ? Color.green : Color.orange)
-                Text("\(item.kind.label): \(item.title)").lineLimit(1)
-            }
-            Text(item.status.label)
-                .foregroundStyle(item.status.isActionable ? Color.secondary : Color.orange)
-            if showAddresses, let detail = item.detail {
-                Text(detail).foregroundStyle(.secondary).textSelection(.enabled)
-            }
+        .frame(height: 22)
+        .opacity(actionsVisible ? 1 : 0)
+        .allowsHitTesting(actionsVisible)
+        .onChange(of: actionsReady) { _, ready in
+            withAnimation(.easeIn(duration: reduceMotion ? 0 : 0.18)) { actionsVisible = ready }
         }
-        .font(.caption2)
-        .padding(.leading, 6)
+        .onAppear {
+            guard actionsReady else { return }
+            withAnimation(.easeIn(duration: reduceMotion ? 0 : 0.18)) { actionsVisible = true }
+        }
+        .onDisappear { actionsVisible = false }
     }
 
-    // leaving a window out changes this operation only, never the saved state
-    private func leaveOut(_ window: RestorePlanWindow) -> Binding<Bool> {
-        Binding(get: { model.replacement.excludedIncoming.contains(window.id) },
-                set: { model.replacement.exclude(incoming: window.id, $0) })
+    private var actionsReady: Bool {
+        transitionComplete && !model.planning && model.plan != nil && model.replacement.preflight != nil
+    }
+}
+
+// one short transition for opening a layout and coming back
+enum PanelMotion {
+    // the travelling preview
+    static func navigation(_ reduceMotion: Bool) -> Animation {
+        .easeInOut(duration: reduceMotion ? 0.18 : 0.25)
     }
 
-    private func actions(_ plan: RestorePlan) -> some View {
-        ReplacementConfirmView(model: model, plan: plan)
+    // the two screens swapping underneath it
+    static func crossfade(_ reduceMotion: Bool) -> Animation {
+        .easeInOut(duration: reduceMotion ? 0.18 : 0.25)
     }
+}
+
+// one coordinate space for the panel, so a card and the layout screen can be measured
+// against the same origin
+enum PanelSpace {
+    static let panel = "anchor.panel"
 }
 
 // what the run is doing and what it did, kept until the next run replaces it

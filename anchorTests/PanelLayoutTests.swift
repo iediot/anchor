@@ -18,6 +18,8 @@ final class PanelLayoutTests: XCTestCase {
             let window = RestoreFixtures.window(resources: RestoreFixtures.browser(["https://example.com/\(index)"]))
             var snapshot = RestoreFixtures.snapshot([window])
             snapshot.name = "state \(index)"
+            // two of them share a second, so the tie breaker is exercised as well
+            snapshot.createdAt = Date(timeIntervalSince1970: 1_780_000_000 + Double(min(index, 2)))
             try? store.create(snapshot)
         }
         model = SavedStatesModel(store: store)
@@ -83,15 +85,58 @@ final class PanelLayoutTests: XCTestCase {
     func testHomeLeavesRoomForTheSavedStateRows() {
         model.show(.home)
         let height = panelHeight(panel)
-        XCTAssertGreaterThan(height, 380, "the history region collapsed again")
+        XCTAssertGreaterThan(height, PanelMetrics.gridHeight(rows: 1), "the grid region collapsed again")
         XCTAssertLessThanOrEqual(height, usableHeight)
+    }
+
+    func testThePanelStaysLandscapeWithTheSmallerCards() {
+        model.show(.home)
+        XCTAssertGreaterThan(PanelMetrics.width, panelHeight(panel))
+        XCTAssertEqual(PanelMetrics.columns, 3)
+        XCTAssertEqual(PanelMetrics.visibleRows, 2)
+        // the panel came down with its cards rather than staying at its old size
+        XCTAssertLessThan(PanelMetrics.width, 460)
+        XCTAssertLessThan(PanelMetrics.gridHeight(rows: PanelMetrics.visibleRows), 360)
+    }
+
+    // oldest first, left to right and then down, so the save tile ends up last
+    func testTheGridReadsOldestFirst() {
+        let ordered = model.oldestFirst
+        XCTAssertEqual(ordered.count, model.snapshots.count)
+        let expected = model.snapshots.sorted { left, right in
+            left.createdAt == right.createdAt ? left.id < right.id : left.createdAt < right.createdAt
+        }
+        XCTAssertEqual(ordered.map(\.id), expected.map(\.id))
+        XCTAssertEqual(ordered.last?.createdAt, model.snapshots.map(\.createdAt).max(), "the newest card is last")
+    }
+
+    func testCardsSavedInTheSameSecondKeepAStableOrder() {
+        let ids = model.oldestFirst.map(\.id)
+        model.reload()
+        XCTAssertEqual(model.oldestFirst.map(\.id), ids)
+    }
+
+    // reading the list again, renaming or opening a card must not move the grid
+    func testAnOrdinaryUpdateDoesNotAskToScrollToTheNewest() {
+        guard let first = model.snapshots.first else { return XCTFail("no fixture snapshot") }
+        model.revealNewest = false
+        model.reload()
+        XCTAssertFalse(model.revealNewest)
+        model.beginRename(first.id)
+        model.cancelRename()
+        XCTAssertFalse(model.revealNewest)
+        model.show(.detail(first.id))
+        model.backToHome()
+        XCTAssertFalse(model.revealNewest)
     }
 
     func testTheEmptyStateStillRendersWithoutRows() {
         let empty = SavedStatesModel(store: SnapshotStore(root: root.appendingPathComponent("empty")))
         XCTAssertTrue(empty.snapshots.isEmpty)
         let height = panelHeight(AnchorPanelView(model: empty, diagnostics: DiagnosticsModel()))
-        XCTAssertGreaterThan(height, 200)
+        // header, save button, the empty line and the footer, the redesign carries no
+        // browser toggle or display line on the home screen any more
+        XCTAssertGreaterThan(height, 150)
         XCTAssertLessThanOrEqual(height, usableHeight)
     }
 
