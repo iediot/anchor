@@ -6,6 +6,7 @@ import SwiftUI
 extension EnvironmentValues {
     @Entry var openSetup: () -> Void = {}
     @Entry var copyTroubleshooting: () -> Void = {}
+    @Entry var closePanel: () -> Void = {}
 }
 
 // the attached surface under the menu bar icon
@@ -16,6 +17,7 @@ struct AnchorPanelView: View {
     @Bindable var setup: PermissionsSetupModel
     @Environment(\.openSetup) private var openSetup
     @Environment(\.copyTroubleshooting) private var copyTroubleshooting
+    @Environment(\.closePanel) private var closePanel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     // the plus turns into a tick for a moment when a save lands, and turns back
     @State private var justSaved = false
@@ -28,6 +30,11 @@ struct AnchorPanelView: View {
     @State private var transitionComplete = true
     // what the grid's scrolling region and the anchor in the strip say to each other
     @State private var scroll = GridScroll()
+    @State private var keyboardSelection: String?
+    @State private var showsKeyboardSelection = false
+    @State private var keyboardAction: Int?
+    @State private var cardFrames: [String: CGRect] = [:]
+    @FocusState private var keyboardFocused: Bool
 
     var body: some View {
         HStack(spacing: 0) {
@@ -44,6 +51,18 @@ struct AnchorPanelView: View {
         .overlay(alignment: .trailing) { anchorStrip }
         .overlay(alignment: .topLeading) { travellingPreview }
         .clipShape(RoundedRectangle(cornerRadius: 12))
+        .focusable()
+        .focusEffectDisabled()
+        .focused($keyboardFocused)
+        .onAppear { focusMenu() }
+        .onChange(of: model.openings) { _, _ in focusMenu() }
+        .onChange(of: model.renaming) { _, id in
+            if id == nil { keyboardFocused = true }
+        }
+        .onKeyPress(keys: [.leftArrow, .rightArrow, .upArrow, .downArrow, .return, .escape],
+                    phases: [.down, .repeat]) { press in
+            navigate(press)
+        }
         // a travel that never gets its landing rectangle must not hold the buttons back
         .task(id: transitionComplete) {
             guard !transitionComplete else { return }
@@ -52,6 +71,76 @@ struct AnchorPanelView: View {
             travelling = nil
             transitionComplete = true
         }
+    }
+
+    private func focusMenu() {
+        showsKeyboardSelection = false
+        keyboardSelection = model.oldestFirst.last?.id
+        keyboardFocused = true
+    }
+
+    private func navigate(_ press: KeyPress) -> KeyPress.Result {
+        guard model.renaming == nil, !model.browserDisclosurePending,
+              press.modifiers.intersection([.command, .option, .control, .shift]).isEmpty else { return .ignored }
+        if press.key == .escape {
+            guard press.phase == .down else { return .handled }
+            if isHome { closePanel() } else if showsLayoutScreen { backToGrid() }
+            else { return .ignored }
+            return .handled
+        }
+        guard !model.busy else { return .ignored }
+        if model.route == .preview {
+            guard transitionComplete, let plan = model.plan,
+                  model.replacement.preflight != nil else { return .handled }
+            let available = ([0].filter { _ in plan.actionableWindowCount > 0 })
+                + (SwitchBlocker.ready(model: model, plan: plan) ? [1, 2] : [])
+            guard !available.isEmpty else { return .handled }
+            if press.key == .return {
+                guard press.phase == .down else { return .handled }
+                let selected = keyboardAction ?? 0
+                guard available.contains(selected) else { return .handled }
+                keyboardAction = selected
+                switch selected {
+                case 1: model.requestReplacement(.saveThenReplace)
+                case 2: model.requestReplacement(.replaceWithoutSaving)
+                default: model.requestExecute()
+                }
+            } else if let selected = keyboardAction, let index = available.firstIndex(of: selected) {
+                let delta = (press.key == .upArrow || press.key == .leftArrow) ? -1 : 1
+                keyboardAction = available[min(max(index + delta, 0), available.count - 1)]
+            } else {
+                keyboardAction = available.first
+            }
+            return .handled
+        }
+        guard isHome else { return .ignored }
+        let cards = model.oldestFirst
+        guard !cards.isEmpty else { return .handled }
+        showsKeyboardSelection = true
+        let index = cards.firstIndex { $0.id == keyboardSelection } ?? cards.count - 1
+        if press.key == .return {
+            if press.phase == .down {
+                openLayout(cards[index], from: cardFrames[cards[index].id] ?? .zero)
+            }
+            return .handled
+        }
+        let columns = PanelMetrics.columns
+        let slot = TileGrid.slot(index, count: cards.count, columns: columns)
+        var next = index
+        if press.key == .leftArrow { next = max(0, index - 1) }
+        if press.key == .rightArrow { next = min(cards.count - 1, index + 1) }
+        if press.key == .upArrow || press.key == .downArrow {
+            let row = slot.row + (press.key == .upArrow ? -1 : 1)
+            let candidates = cards.indices.filter {
+                TileGrid.slot($0, count: cards.count, columns: columns).row == row
+            }
+            next = candidates.min {
+                abs(TileGrid.slot($0, count: cards.count, columns: columns).column - slot.column)
+                    < abs(TileGrid.slot($1, count: cards.count, columns: columns).column - slot.column)
+            } ?? index
+        }
+        keyboardSelection = cards[next].id
+        return .handled
     }
 
     // the anchor and its chain, the grid's scrollbar while the grid is the screen and
@@ -81,9 +170,11 @@ struct AnchorPanelView: View {
     // flies to where the layout screen will draw its own
     private func openLayout(_ snapshot: Snapshot, from frame: CGRect) {
         guard !model.busy else { return }
+        keyboardAction = nil
+        keyboardFocused = true
         tileRect = frame
         detailRect = .zero
-        transitionComplete = reduceMotion
+        transitionComplete = reduceMotion || frame.width <= 1
         if !reduceMotion, frame.width > 1 {
             travelling = snapshot
             travelRect = frame
@@ -106,6 +197,7 @@ struct AnchorPanelView: View {
     }
 
     private func backToGrid() {
+        showsKeyboardSelection = false
         let target = tileRect
         transitionComplete = reduceMotion
         if !reduceMotion, detailRect.width > 1, target.width > 1 {
@@ -137,6 +229,7 @@ struct AnchorPanelView: View {
                     RestorePreviewView(model: model,
                                        previewHidden: travelling != nil,
                                        transitionComplete: transitionComplete,
+                                       keyboardAction: keyboardAction,
                                        onPreviewFrame: travelToDetail,
                                        onBack: backToGrid)
                         .transition(.opacity)
@@ -145,19 +238,19 @@ struct AnchorPanelView: View {
             .frame(height: PanelMetrics.panelHeight)
         } else {
             VStack(alignment: .leading, spacing: 0) {
+                toolbar
                 header
                 content.frame(maxWidth: .infinity, alignment: .leading)
-                footer
             }
         }
     }
 
     private var gridColumn: some View {
-        // the cards scroll under the footer and show through its blur
+        // the cards scroll under the bar and show through its blur
         // the box is the panel's height whether the grid fills it or not
-        ZStack(alignment: .bottom) {
+        ZStack(alignment: .top) {
             home.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            footer
+            toolbar
         }
         .frame(height: PanelMetrics.panelHeight)
     }
@@ -245,13 +338,14 @@ struct AnchorPanelView: View {
     }
 
     private var home: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // anything the grid has to say hangs under the bar, the cards clear both
+        ZStack(alignment: .top) {
+            grid.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             notices
-            grid
         }
     }
 
-    // whatever sits above the grid comes out of the grid's own height, so the panel
+    // whatever sits under the bar comes out of the grid's own room, so the panel
     // stays the one size
     private var aboveGridReserve: CGFloat {
         var total: CGFloat = 0
@@ -264,7 +358,7 @@ struct AnchorPanelView: View {
             || model.replacement.stage == .awaitingCaptureDecision
     }
 
-    // everything that is not a saved layout, kept to one compact block above the grid
+    // everything that is not a saved layout, kept to one compact block under the bar
     // nothing is rendered, and no room taken, when there is nothing to say
     @ViewBuilder
     private var notices: some View {
@@ -280,28 +374,34 @@ struct AnchorPanelView: View {
             }
             .frame(maxWidth: 480, alignment: .leading)
             .padding(.horizontal, PanelMetrics.gridPadding)
+            .padding(.top, PanelMetrics.barHeight)
             .padding(.bottom, 8)
         }
     }
 
     private var grid: some View {
         let cards = model.oldestFirst
-        // the cards sit in the room above the footer. while they fit there the region
-        // neither scrolls nor bounces, and they start at the top on the same padding the
-        // first card has on its left. the newest end is only scrolled to once there is an
-        // end that is off screen
-        return PanelScroll(maxHeight: max(PanelMetrics.gridHeight(rows: 1),
-                                          PanelMetrics.panelHeight - aboveGridReserve),
+        // the cards sit in the room under the bar. while they fit there the region
+        // neither scrolls nor bounces, and the newest end is only scrolled to once there
+        // is an end that is off screen
+        return PanelScroll(maxHeight: PanelMetrics.panelHeight,
                            revealBottom: $model.revealNewest,
                            fillsItsBox: true,
-                           bottomClearance: PanelMetrics.footerHeight,
-                           scroll: scroll) {
+                           topClearance: PanelMetrics.barHeight + aboveGridReserve,
+                           scroll: scroll,
+                           selectedTile: keyboardSelection) {
             // a plain stack, because a lazy one has no reliable height to measure
             VStack(alignment: .leading, spacing: PanelMetrics.tileSpacing) {
                 if cards.isEmpty && model.failures.isEmpty {
-                    Text("No anchor points yet.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(spacing: 5) {
+                        Text("Your next starting point")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Save this screen. Pick it up later.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 20)
                 }
                 // one container for every card, so a card whose row changes travels there
                 // rather than being taken out of one stack and put into another
@@ -312,7 +412,13 @@ struct AnchorPanelView: View {
                         SavedLayoutTile(snapshot: snapshot,
                                         model: model,
                                         previewHidden: travelling?.id == snapshot.id,
-                                        onOpen: { frame in openLayout(snapshot, from: frame) })
+                                        keyboardSelected: showsKeyboardSelection && keyboardSelection == snapshot.id,
+                                        onPreviewFrame: { cardFrames[snapshot.id] = $0 },
+                                        onOpen: { frame in
+                                            showsKeyboardSelection = false
+                                            keyboardSelection = snapshot.id
+                                            openLayout(snapshot, from: frame)
+                                        })
                             .id(PanelScrollAnchor.tile(snapshot.id))
                             // a new card fades in, a deleted one goes at once, because the
                             // gap has to close while the others move rather than after
@@ -355,7 +461,8 @@ struct AnchorPanelView: View {
             .padding(PanelMetrics.gridPadding)
     }
 
-    private var footer: some View {
+    // the bar across the top, the way a menu carries its own controls
+    private var toolbar: some View {
         HStack(spacing: 8) {
             secondaryControls
             Button {
@@ -363,7 +470,7 @@ struct AnchorPanelView: View {
                 model.requestSave()
             } label: {
                 ZStack {
-                    Label("New Anchor Point", systemImage: "plus")
+                    Label("Save", systemImage: "square.and.arrow.down")
                         .opacity(justSaved ? 0 : 1)
                     Label("Saved", systemImage: "checkmark")
                         .opacity(justSaved ? 1 : 0)
@@ -371,13 +478,9 @@ struct AnchorPanelView: View {
                 .font(.caption)
             }
             .controlSize(.small)
-            .buttonStyle(.plain)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(RoundedRectangle(cornerRadius: 5))
+            .buttonStyle(PanelActionStyle(prominent: true, height: 20, inset: 6))
             .allowsHitTesting(!model.busy)
-            .accessibilityLabel(justSaved ? "Saved" : "New Anchor Point")
+            .accessibilityLabel(justSaved ? "Saved" : "Save")
             .accessibilityValue(model.saving ? "Saving" : "")
             .overlay {
                 if model.saving {
@@ -406,21 +509,25 @@ struct AnchorPanelView: View {
                     .foregroundStyle(.orange)
                     .lineLimit(1)
                 // the asking itself belongs to the setup window, the panel only points at it
-                Button("Set Up…") { openSetup() }
+                Button("Settings…") { openSetup() }
                     .buttonStyle(.link)
                     .font(.caption)
             }
         }
         .padding(.horizontal, PanelMetrics.gridPadding)
-        .frame(height: PanelMetrics.footerHeight)
-        // the blur ramps in above the bar, so cards slide into it instead of hitting a line
+        // the controls sit on the shared line, not in the middle of the bar
+        .frame(height: PanelMetrics.headControl)
+        .padding(.top, PanelMetrics.headInset)
+        .frame(height: PanelMetrics.barHeight, alignment: .top)
+        // the blur ramps out below the bar, so cards slide under it instead of hitting a line
         // the bar runs the full width of the panel, the reserved strip included
-        .background(alignment: .bottomLeading) {
+        .background(alignment: .topLeading) {
             WithinWindowBlur()
-                .frame(width: PanelMetrics.width, height: PanelMetrics.footerHeight + 22)
-                .mask(LinearGradient(stops: [.init(color: .clear, location: 0),
-                                             .init(color: .black.opacity(0.6), location: 0.45),
-                                             .init(color: .black, location: 0.8)],
+                .frame(width: PanelMetrics.width, height: PanelMetrics.barHeight + 22)
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0),
+                                             .init(color: .black, location: 0.2),
+                                             .init(color: .black.opacity(0.6), location: 0.55),
+                                             .init(color: .clear, location: 1)],
                                      startPoint: .top,
                                      endPoint: .bottom))
                 .allowsHitTesting(false)
@@ -430,19 +537,22 @@ struct AnchorPanelView: View {
     // everything that is not saving or switching lives behind this one control
     private var secondaryControls: some View {
         Menu {
-            Toggle("Include browser tabs when saving", isOn: $model.includeBrowserTabs)
-            Divider()
-            Button("Permissions…") { openSetup() }
+            Button("Settings…") { openSetup() }
             Button("Copy Troubleshooting Report") { copyTroubleshooting() }
             Divider()
             Button("Quit Anchor") { NSApplication.shared.terminate(nil) }
         } label: {
             Label("Settings", systemImage: "gearshape")
                 .labelStyle(.iconOnly)
+                .font(.system(size: 11, weight: .semibold))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        // the circle goes round the menu, not inside its label: a borderless menu draws
+        // the glyph and throws away any background set in there
+        .frame(width: PanelMetrics.headControl, height: PanelMetrics.headControl)
+        .background(Color.primary.opacity(0.065), in: Circle())
     }
 
     private var disclosure: some View {
@@ -496,7 +606,7 @@ struct SavingOutline: View {
     }
 
     private func segment(from: CGFloat, to: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 5)
+        RoundedRectangle(cornerRadius: PanelStyle.controlRadius)
             .trim(from: from, to: to)
             .stroke(Color.primary.opacity(0.8), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
     }
@@ -508,9 +618,12 @@ struct SavedLayoutTile: View {
     @Bindable var model: SavedStatesModel
     // the travelling copy stands in for this one while it is on its way out or back
     var previewHidden = false
+    var keyboardSelected = false
+    var onPreviewFrame: (CGRect) -> Void = { _ in }
     var onOpen: (CGRect) -> Void = { _ in }
 
     @State private var previewFrame: CGRect = .zero
+    @State private var hovered = false
     @FocusState private var nameFocused: Bool
     private var isRenaming: Bool { model.renaming == snapshot.id }
 
@@ -527,6 +640,11 @@ struct SavedLayoutTile: View {
                            height: PanelMetrics.tileThumbnailHeight,
                            alignment: .leading)
                     .opacity(previewHidden ? 0 : 1)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: PanelStyle.previewRadius, style: .continuous)
+                            .strokeBorder(Color.primary.opacity(hovered && !previewHidden ? 0.45 : 0), lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
                     .onGeometryChange(for: CGRect.self) { proxy in
                         proxy.frame(in: .named(PanelSpace.panel))
                     } action: { frame in
@@ -536,7 +654,7 @@ struct SavedLayoutTile: View {
                     if isRenaming {
                         TextField(SavedStatesFormat.displayName(snapshot), text: $model.draftName)
                             .textFieldStyle(.plain)
-                            .font(.caption)
+                            .font(PanelStyle.label)
                             .focused($nameFocused)
                             .onSubmit { model.commitRename() }
                             .onExitCommand { model.cancelRename() }
@@ -555,7 +673,7 @@ struct SavedLayoutTile: View {
                             }
                     } else {
                         Text(SavedStatesFormat.displayName(snapshot))
-                            .font(.caption)
+                            .font(PanelStyle.label)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
@@ -584,6 +702,16 @@ struct SavedLayoutTile: View {
                 .padding(.top, PanelMetrics.tileThumbnailHeight + 2)
         }
         .frame(width: PanelMetrics.tileWidth, height: PanelMetrics.tileHeight)
+        .overlay {
+            if keyboardSelected && !isRenaming {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.primary.opacity(0.45), lineWidth: 1)
+                    .padding(-3)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onChange(of: previewFrame) { _, frame in onPreviewFrame(frame) }
+        .onHover { hovered = $0 }
         .task(id: isRenaming) {
             guard isRenaming else { return }
             await Task.yield()
@@ -606,7 +734,7 @@ struct SavedLayoutTile: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(hovered || isRenaming ? Color.primary : Color.secondary)
                 .frame(width: 20, height: 14)
                 .contentShape(Rectangle())
         }

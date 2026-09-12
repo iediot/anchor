@@ -14,13 +14,14 @@ struct PanelScroll<Content: View>: View {
     // the region keeps its whole box even when the content is short, so the panel around
     // it does not change size. the content sits at the top of it, on its own padding
     var fillsItsBox = false
-    // the strip along the bottom a footer covers, which content has to clear
-    // it is counted once: as room the content must fit above, and as the padding that
-    // lets the last row scroll clear of the bar
-    var bottomClearance: CGFloat = 0
+    // the strip along the top the bar covers, which content has to clear
+    // it is counted once: as room the content must fit below, and as the padding that
+    // lets the first row scroll clear of the bar
+    var topClearance: CGFloat = 0
     // the anchor in the strip stands in for the native indicator, so the region tells it
     // where it is and takes the places a drag of it asks for
     var scroll: GridScroll?
+    var selectedTile: String?
     @ViewBuilder let content: Content
 
     @State private var measured: CGFloat = 0
@@ -53,9 +54,9 @@ struct PanelScroll<Content: View>: View {
     // nothing is scrolled to an end that is already on screen
     private var still: some View {
         VStack(spacing: 0) {
+            Color.clear.frame(height: topClearance)
             measuredContent
-                .frame(maxHeight: .infinity, alignment: .top)
-            Color.clear.frame(height: bottomClearance)
+                .frame(maxHeight: .infinity, alignment: scroll == nil ? .top : .center)
         }
         .onAppear { revealBottom?.wrappedValue = false }
         .onChange(of: revealBottom?.wrappedValue ?? false) { revealBottom?.wrappedValue = false }
@@ -65,8 +66,8 @@ struct PanelScroll<Content: View>: View {
         ScrollViewReader { proxy in
             ScrollView {
                 measuredContent
-                    // the last row has to be able to come out from under the bar
-                    .padding(.bottom, bottomClearance)
+                    // the first row has to be able to come out from under the bar
+                    .padding(.top, topClearance)
                 // a named end, the reveal and the anchor both reach for it
                 Color.clear
                     .frame(height: 0)
@@ -101,6 +102,10 @@ struct PanelScroll<Content: View>: View {
             .onAppear { reveal(proxy) }
             .onChange(of: revealBottom?.wrappedValue ?? false) { reveal(proxy) }
             .onChange(of: measured) { reveal(proxy) }
+            .onChange(of: selectedTile) { _, id in
+                guard let id else { return }
+                proxy.scrollTo(PanelScrollAnchor.tile(id), anchor: .bottom)
+            }
         }
     }
 
@@ -139,7 +144,7 @@ struct PanelScroll<Content: View>: View {
     // the content, its padding and the strip the footer covers, all against the room
     // there actually is. until it has been measured the scrolling region is the safe one
     private var fits: Bool {
-        measured > 0 && measured <= maxHeight - bottomClearance
+        measured > 0 && measured <= maxHeight - topClearance
     }
 
     // an explicit height is the point, a maximum alone is what the panel collapses
@@ -148,7 +153,7 @@ struct PanelScroll<Content: View>: View {
         // the panel is laid out at anyway
         guard measured > 0 else { return maxHeight }
         guard fits else { return maxHeight }
-        return fillsItsBox ? maxHeight : min(measured + bottomClearance, maxHeight)
+        return fillsItsBox ? maxHeight : min(measured + topClearance, maxHeight)
     }
 }
 
@@ -264,22 +269,28 @@ enum PanelMetrics {
         return tileHeight * CGFloat(rows) + tileSpacing * CGFloat(rows - 1) + gridPadding * 2
     }
 
-    // exactly two rows of cards, padding and spacing included
-    static let visibleRows = 2
+    // one row of cards, padding and spacing included
+    static let visibleRows = 1
 
     // the grid has no header above it, only the footer and whatever notice is showing
     static let gridChrome: CGFloat = 150
 
     // the bar the settings and save controls sit on, the grid scrolls under it
-    static let footerHeight: CGFloat = 36
+    static let barHeight: CGFloat = 30
+
+    // both screens open with a round control on this line, measured down from the top of
+    // the panel, so the cog and the back chevron land in the same place
+    static let headControl: CGFloat = 24
+    static let headLine: CGFloat = 17
+    static var headInset: CGFloat { headLine - headControl / 2 }
 
     // the layout screen fills the same box the grid does, so opening one does not
     // resize the panel
-    static var panelHeight: CGFloat { gridViewport(chrome: gridChrome) + footerHeight }
+    static var panelHeight: CGFloat { gridViewport(chrome: gridChrome) + barHeight }
 
     // what is left for the preview and any warning once the name row and the actions
     // have taken their fixed share
-    static var detailMiddleHeight: CGFloat { max(90, panelHeight - 82) }
+    static var detailMiddleHeight: CGFloat { max(32, panelHeight - 56) }
 
     static func gridViewport(chrome: CGFloat) -> CGFloat {
         max(gridHeight(rows: 1), min(gridHeight(rows: visibleRows), usableHeight - chrome))

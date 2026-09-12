@@ -60,8 +60,11 @@ struct LayoutThumbnail: View {
             }
         }
         .frame(width: size.width, height: size.height)
-        .clipShape(RoundedRectangle(cornerRadius: 4))
-        .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.secondary.opacity(0.35), lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: PanelStyle.previewRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: PanelStyle.previewRadius, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
+        }
         .accessibilityLabel(label)
     }
 
@@ -81,7 +84,7 @@ struct LayoutThumbnail: View {
                 .aspectRatio(contentMode: .fill)
                 .frame(width: size.width, height: size.height)
         } else {
-            RoundedRectangle(cornerRadius: 4).fill(.quaternary)
+            RoundedRectangle(cornerRadius: PanelStyle.previewRadius).fill(Color.primary.opacity(0.045))
         }
     }
 

@@ -7,50 +7,97 @@ struct RestorePreviewView: View {
     // the travelling copy stands in for this one while it is on its way here
     var previewHidden = false
     var transitionComplete = true
+    var keyboardAction: Int?
     var onPreviewFrame: (CGRect) -> Void = { _ in }
     var onBack: () -> Void = {}
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var actionsVisible = false
+    @State private var showingWarnings = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             heading
-            middle
-            actions
+            HStack(alignment: .center, spacing: 12) {
+                middle
+                    .frame(width: previewColumnWidth)
+                actions
+                    .frame(width: 132)
+                    .offset(x: -(previewColumnWidth - previewWidth) / 2 + 4)
+            }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+        // the back chevron lands on the same line the grid's cog does
+        .padding(.top, PanelMetrics.headInset)
         .frame(width: PanelMetrics.contentWidth, height: PanelMetrics.panelHeight, alignment: .top)
     }
 
     private var snapshot: Snapshot? { model.selected }
+    private var previewColumnWidth: CGFloat { PanelMetrics.contentWidth - 168 }
+
+    private var previewWidth: CGFloat {
+        let frame = snapshot?.display.frame.cgRect
+        let aspect: CGFloat
+        if let frame, frame.width.isFinite, frame.height.isFinite, frame.width > 0, frame.height > 0 {
+            aspect = frame.width / frame.height
+        } else {
+            aspect = 1.6
+        }
+        return min(previewColumnWidth, PanelMetrics.detailMiddleHeight * aspect)
+    }
 
     private var heading: some View {
         HStack(spacing: 6) {
             Button {
                 onBack()
             } label: {
-                Image(systemName: "chevron.left").font(.caption)
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 24, height: 24)
+                    .background(Color.primary.opacity(0.065), in: Circle())
             }
             .buttonStyle(.plain)
             .help("Saved layouts")
             Text(snapshot.map { SavedStatesFormat.displayName($0) } ?? "Saved layout")
-                .font(.callout)
+                .font(.system(size: 12, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 0)
+            if hasWarnings {
+                Button {
+                    showingWarnings.toggle()
+                } label: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help(switchReason ?? "Review restoration notes")
+                .accessibilityLabel(switchReason ?? "Review restoration notes")
+                .popover(isPresented: $showingWarnings) {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            warnings
+                        }
+                        .padding(12)
+                    }
+                    .scrollIndicators(.hidden)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .frame(width: 320, height: 220)
+                }
+            }
             if model.planning {
                 ProgressView().controlSize(.small)
             }
         }
-        .frame(height: 20)
+        .frame(height: PanelMetrics.headControl)
     }
 
     private var middle: some View {
-        ScrollView {
+        Group {
             VStack(alignment: .leading, spacing: 8) {
                 if let snapshot {
                     LayoutThumbnail(snapshot: snapshot,
-                                    fit: CGSize(width: PanelMetrics.contentWidth - 24,
+                                    fit: CGSize(width: previewWidth,
                                                 height: PanelMetrics.detailMiddleHeight),
                                     backdrop: model.thumbnailImage(for: snapshot.id))
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -61,11 +108,20 @@ struct RestorePreviewView: View {
                             onPreviewFrame(frame)
                         }
                 }
-                warnings
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(height: PanelMetrics.detailMiddleHeight)
+    }
+
+    private var switchReason: String? {
+        guard let plan = model.plan else { return nil }
+        return SwitchBlocker.reason(model: model, plan: plan)
+    }
+
+    private var hasWarnings: Bool {
+        model.planRebuiltNotice != nil || model.planError != nil
+            || actionableNotes.contains { $0.severity == .blocker } || switchReason != nil
     }
 
     // routine detail belongs to the record screen, what stays here is what a person has
@@ -78,8 +134,16 @@ struct RestorePreviewView: View {
         if let error = model.planError {
             note(error, severity: .blocker)
         }
-        ForEach(actionableNotes) { item in
+        ForEach(actionableNotes.filter { $0.severity == .blocker }) { item in
             note(item.text, severity: item.severity)
+        }
+        let limitations = actionableNotes.filter { $0.severity == .limitation }
+        if !limitations.isEmpty {
+            DisclosureGroup("\(limitations.count) restoration \(limitations.count == 1 ? "note" : "notes")") {
+                ForEach(limitations) { item in note(item.text, severity: item.severity) }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
         // the reason a switch is refused, never left to a tooltip
         if let plan = model.plan, let reason = SwitchBlocker.reason(model: model, plan: plan) {
@@ -114,22 +178,15 @@ struct RestorePreviewView: View {
     private var actions: some View {
         Group {
             if let plan = model.plan {
-                ReplacementConfirmView(model: model, plan: plan)
+                ReplacementConfirmView(model: model, plan: plan, keyboardAction: keyboardAction)
             } else {
                 Color.clear
             }
         }
-        .frame(height: 22)
-        .opacity(actionsVisible ? 1 : 0)
-        .allowsHitTesting(actionsVisible)
-        .onChange(of: actionsReady) { _, ready in
-            withAnimation(.easeIn(duration: reduceMotion ? 0 : 0.18)) { actionsVisible = ready }
-        }
-        .onAppear {
-            guard actionsReady else { return }
-            withAnimation(.easeIn(duration: reduceMotion ? 0 : 0.18)) { actionsVisible = true }
-        }
-        .onDisappear { actionsVisible = false }
+        .frame(height: PanelMetrics.detailMiddleHeight)
+        .opacity(actionsReady ? 1 : 0)
+        .allowsHitTesting(actionsReady)
+        .animation(.easeIn(duration: reduceMotion ? 0 : 0.18), value: actionsReady)
     }
 
     private var actionsReady: Bool {
@@ -166,112 +223,4 @@ enum PanelMotion {
 // against the same origin
 enum PanelSpace {
     static let panel = "anchor.panel"
-}
-
-// what the run is doing and what it did, kept until the next run replaces it
-struct RestoreProgressView: View {
-    @Bindable var model: SavedStatesModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PanelScroll(maxHeight: PanelMetrics.viewport(reserving: 200)) {
-                VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Text(title).font(.headline)
-                            Spacer()
-                            Button("Copy Report") { copy(model.restore.report) }
-                                .buttonStyle(.link)
-                                .font(.caption)
-                        }
-                        Text(model.restore.summary).font(.caption).foregroundStyle(.secondary)
-                        Text("operation \(model.restore.log.id) · launch requests \(model.restore.launchRequests)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    RestoreReportList(restore: model.restore)
-                }
-                .padding(14)
-                .textSelection(.enabled)
-            }
-            Divider()
-            HStack {
-                if model.restore.isRunning {
-                    Button("Cancel") { model.restore.cancel() }
-                    Text("already opened windows stay open")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Button("Saved States") { model.backToHome() }
-                    Spacer()
-                    Text("nothing was closed or replaced")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(14)
-        }
-    }
-
-    private var title: String {
-        switch model.restore.phase {
-        case .idle: return "Nothing has run yet"
-        case .running: return "Reopening \(model.restore.snapshotName ?? "the saved state")"
-        case .finished: return "Finished"
-        case .cancelled: return "Cancelled"
-        }
-    }
-
-}
-
-// one line per window of a run, shared by the development reopen and by a replacement
-struct RestoreReportList: View {
-    let restore: RestoreCoordinator
-
-    var body: some View {
-        ForEach(restore.reports) { report in
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Image(systemName: icon(report.state))
-                        .foregroundStyle(tint(report.state))
-                    Text(report.title ?? report.appName).font(.callout).lineLimit(1)
-                    Text(report.state.rawValue).font(.caption2).foregroundStyle(.secondary)
-                }
-                Text(report.summary).font(.caption2).foregroundStyle(.secondary)
-                if let evidence = report.evidence {
-                    Text(evidence).font(.caption2).foregroundStyle(.secondary)
-                }
-                if let placement = report.placement {
-                    Text("layout: \(placement)").font(.caption2).foregroundStyle(.secondary)
-                }
-                ForEach(report.items) { item in
-                    Text("\(item.kind.label): \(item.title) — \(item.state.rawValue)\(item.detail.map { ", \($0)" } ?? "")")
-                        .font(.caption2)
-                        .foregroundStyle(item.state == .failed ? Color.orange : Color.secondary)
-                        .padding(.leading, 8)
-                }
-            }
-        }
-    }
-
-    private func icon(_ state: RestoreCoordinator.WindowState) -> String {
-        switch state {
-        case .pending: return "clock"
-        case .running: return "arrow.triangle.2.circlepath"
-        case .opened: return "checkmark.circle"
-        case .reused: return "arrow.uturn.left.circle"
-        case .skipped: return "minus.circle"
-        case .failed: return "exclamationmark.circle"
-        case .cancelled: return "xmark.circle"
-        }
-    }
-
-    private func tint(_ state: RestoreCoordinator.WindowState) -> Color {
-        switch state {
-        case .opened, .reused: return .green
-        case .failed: return .orange
-        case .skipped, .cancelled: return .secondary
-        default: return .secondary
-        }
-    }
 }

@@ -133,12 +133,19 @@ struct AnchorChainStrip: View {
     // last card in a row
     private let gripWidth: CGFloat = 22
     private let gripHeight: CGFloat = 26
-    private let topInset: CGFloat = 4
+    // it has to clear the bar at the top. the reserve at the foot is by eye, between the
+    // bar's own and the floor, so it hangs low without sitting on the edge
+    private var topInset: CGFloat { PanelMetrics.barHeight + 2 }
+    private let bottomInset: CGFloat = 18
+    // the drop comes in over the panel's own top edge, not from the top of the travel, so
+    // it reads as coming down from the ring in the menu bar. the strip's clip hides the
+    // part still above the edge, and the chain has paid out nothing yet
+    private let dropFrom: CGFloat = -6
 
     var body: some View {
         GeometryReader { proxy in
             let travel = travelHeight(in: proxy.size.height)
-            let top = topInset + travel * CGFloat(dropped ? scroll.progress : 0)
+            let top = dropped ? topInset + travel * CGFloat(scroll.progress) : dropFrom
             // one line for all three: the chain hangs on it and the anchor's own ring,
             // not the middle of its box, is what sits on it
             let centre = markCentre(in: proxy.size.width)
@@ -174,11 +181,13 @@ struct AnchorChainStrip: View {
                             y: top + AnchorArt.box / 2 - gripHeight / 2)
                 // a small joining link reaches into the eye without crossing the shaft
                 Path { path in
-                    path.move(to: CGPoint(x: line, y: eye - 3))
-                    path.addLine(to: CGPoint(x: line, y: eye - 0.2))
+                    path.move(to: .zero)
+                    path.addLine(to: CGPoint(x: 0, y: 2.8))
                 }
                 .stroke(ink,
                         style: StrokeStyle(lineWidth: ChainMetrics.lineWidth, lineCap: .round))
+                .frame(width: ChainMetrics.lineWidth, height: 2.8)
+                .offset(x: line, y: eye - 3)
                 .allowsHitTesting(false)
             }
             .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
@@ -217,7 +226,7 @@ struct AnchorChainStrip: View {
     }
 
     private func travelHeight(in height: CGFloat) -> CGFloat {
-        max(0, height - topInset - PanelMetrics.footerHeight - 2 - AnchorArt.box)
+        max(0, height - topInset - bottomInset - AnchorArt.box)
     }
 
     // the drop plays for an opening of the panel, not for anything the model does, so

@@ -9,6 +9,7 @@ import SwiftUI
 final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let savedStates = SavedStatesModel()
     let setup = PermissionsSetupModel()
+    let shortcut = PanelShortcut()
 
     private var statusItem: NSStatusItem?
     private var panel: AnchorPanel?
@@ -39,6 +40,7 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
         item.button?.action = #selector(toggle)
         item.button?.setAccessibilityLabel("Anchor")
         statusItem = item
+        shortcut.start { [weak self] in self?.toggle() }
         savedStates.dismissForOperation = { [weak self] in self?.close() }
         refreshIcon()
         appearanceObservation = item.button?.observe(\.effectiveAppearance, options: [.new]) { [weak self] _, _ in
@@ -66,7 +68,12 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
     }
 
     @objc private func applicationResigned() {
+        shortcut.cancelRecording()
         close()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        shortcut.stop()
     }
 
     func open() {
@@ -122,14 +129,14 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
     func showSetup() {
         close()
         if setupWindow == nil {
-            let root = PermissionsSetupView(model: setup, savedStates: savedStates) { [weak self] in
+            let root = PermissionsSetupView(model: setup, savedStates: savedStates, shortcut: shortcut) { [weak self] in
                 self?.dismissSetup()
             }
             let controller = NSHostingController(rootView: root)
             let window = NSWindow(contentViewController: controller)
-            window.title = "Anchor Setup"
+            window.title = "Settings"
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.setContentSize(NSSize(width: 560, height: 620))
+            window.setContentSize(NSSize(width: 460, height: 560))
             window.isReleasedWhenClosed = false
             window.setFrameAutosaveName(SetupWindow.id)
             window.delegate = self
@@ -147,6 +154,7 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
 
     func windowWillClose(_ notification: Notification) {
         guard notification.object as? NSWindow === setupWindow else { return }
+        shortcut.cancelRecording()
         setup.markShown()
         // whatever was granted while it was open decides what the panel shows now
         setup.refreshPermissions()
@@ -177,8 +185,9 @@ final class StatusPanelPresenter: NSObject, NSApplicationDelegate, NSWindowDeleg
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let root = AnchorPanelView(model: savedStates, setup: setup)
             .environment(\.openSetup) { [weak self] in self?.showSetup() }
+            .environment(\.closePanel) { [weak self] in self?.close() }
             .environment(\.copyTroubleshooting) { [weak self] in self?.copyTroubleshootingReport() }
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .background { PanelSurface() }
         let controller = NSHostingController(rootView: root)
         // the content decides the size, the placement keeps the top edge under the icon
         controller.sizingOptions = [.preferredContentSize]

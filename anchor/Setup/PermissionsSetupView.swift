@@ -2,192 +2,133 @@ import AppKit
 import Combine
 import SwiftUI
 
-// the first launch window, and the one settings, permissions opens later
-// every permission is explained in its own words, asked for through the flow macos
-// supports for it, and none of them is required to use anchor
 struct PermissionsSetupView: View {
     @Bindable var model: PermissionsSetupModel
     @Bindable var savedStates: SavedStatesModel
+    @Bindable var shortcut: PanelShortcut
     var onContinue: () -> Void = {}
 
     @State private var refreshing = false
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    header
-                    Divider()
-                    accessibility
-                    Divider()
-                    automation
-                    Divider()
-                    screenRecording
+            Form {
+                Section("General") {
+                    HStack {
+                        Toggle("Keyboard shortcut", isOn: $shortcut.enabled)
+                        Spacer()
+                        Button(shortcut.recording ? "Press shortcut…" : shortcut.label) {
+                            if shortcut.recording {
+                                shortcut.cancelRecording()
+                            } else {
+                                shortcut.beginRecording()
+                            }
+                        }
+                        .disabled(!shortcut.enabled)
+                        Button("Reset") { shortcut.reset() }
+                            .disabled(shortcut.recording)
+                    }
+                    if let hint = shortcut.recordingHint {
+                        Text(hint).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("Opens or closes Anchor. Requires Accessibility. The shortcut also reaches the active app.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle("Include browser tabs when saving", isOn: $savedStates.includeBrowserTabs)
+                    Text("Full URLs and titles stay on this Mac. Private tabs may be included.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Section("Permissions") {
+                    permissionRow("Accessibility", granted: model.accessibilityGranted,
+                                  detail: "Read, move and close windows. Enable the shortcut.") {
+                        if model.accessibilityGranted {
+                            Permissions.openAccessibilitySettings()
+                        } else {
+                            model.requestAccessibility()
+                        }
+                    }
+                    permissionRow("Screen Recording", granted: model.screenRecordingGranted,
+                                  detail: "Blurred layout previews. Sharp images are never stored.") {
+                        if model.screenRecordingGranted {
+                            Permissions.openScreenRecordingSettings()
+                        } else {
+                            Task { await model.requestScreenRecording() }
+                        }
+                    }
+                    if !model.screenRecordingGranted {
+                        Text("Optional. Without it, previews use window outlines. A restart may be needed after granting access.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
+                Section {
+                    ForEach(model.scriptedApps.filter { $0.isInstalled }, id: \.kind) { app in
+                        HStack(spacing: 10) {
+                            Text(app.kind.displayName)
+                            Spacer()
+                            Text(model.isGranted(app) ? "Allowed" : model.status(app))
+                                .font(.caption).foregroundStyle(.secondary)
+                            if model.asking.contains(app.kind) {
+                                ProgressView().controlSize(.small)
+                            } else if !model.isGranted(app) {
+                                Button("Allow") {
+                                    Task { await model.requestAutomation(for: app.kind) }
+                                }
+                                .disabled(!model.canAsk(app))
+                            }
+                        }
+                    }
+                } header: {
+                    HStack {
+                        Text("Automation")
+                        Spacer()
+                        Button("Manage…") { Permissions.openAutomationSettings() }
+                            .buttonStyle(.link)
+                    }
+                } footer: {
+                    Text("Tabs, folders and projects. macOS asks per app; open an app to allow it.")
+                }
             }
-            Divider()
-            footer
+            .formStyle(.grouped)
+            .scrollIndicators(.hidden)
+            HStack {
+                Button("Refresh") { Task { await refresh() } }
+                    .disabled(refreshing)
+                if refreshing { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("Done") { onContinue() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
         }
-        .frame(minWidth: 520, minHeight: 520)
+        .frame(minWidth: 440, minHeight: 460)
         .task { await refresh() }
-        // coming back from system settings makes anchor active again, which is the moment
-        // a granted permission becomes visible here
+        .onChange(of: shortcut.enabled) { _, _ in shortcut.cancelRecording() }
+        .onDisappear { shortcut.cancelRecording() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            model.refreshPermissions()
+            Task { await refresh() }
+        }
+    }
+
+    private func permissionRow(_ title: String, granted: Bool, detail: String,
+                               action: @escaping () -> Void) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(granted ? "Allowed" : "Not allowed")
+                .font(.caption).foregroundStyle(.secondary)
+            Button(granted ? "Manage…" : "Allow", action: action)
         }
     }
 
     private func refresh() async {
+        guard !refreshing else { return }
         refreshing = true
         await model.refresh()
         refreshing = false
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Anchor Setup").font(.title2).bold()
-            Text("""
-                 Anchor saves the windows on one display and opens them again later. \
-                 These permissions decide how much of that it can do.
-                 """)
-            Text("Nothing here is required. Anchor runs with whatever you allow, and you can come back to this window from the panel's Settings menu, under Permissions.")
-                .foregroundStyle(.secondary)
-        }
-        .font(.callout)
-    }
-
-    private var accessibility: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            heading("Accessibility", granted: model.accessibilityGranted)
-            Text("""
-                 Anchor reads window titles and positions with it, and it is what moves windows \
-                 back into place when you open a saved layout. Without it a layout still saves, \
-                 but with no titles and nothing to place windows with.
-                 """)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Button("Grant Accessibility") { model.requestAccessibility() }
-                    .disabled(model.accessibilityGranted)
-                Button("Open Settings") { Permissions.openAccessibilitySettings() }
-                    .buttonStyle(.link)
-            }
-            Text("macOS asks once, and the switch itself is turned on in System Settings.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var automation: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("Automation").font(.headline)
-                Spacer(minLength: 0)
-                // the only way back for one that was allowed and is now to be withdrawn
-                Button("Open Settings") { Permissions.openAutomationSettings() }
-                    .buttonStyle(.link)
-                    .font(.caption)
-            }
-            Text("""
-                 Anchor asks Safari, Chrome, Terminal, iTerm2 and Xcode about their own open \
-                 windows, so a saved layout can carry tabs and working directories rather than \
-                 rectangles alone. macOS grants this one application at a time.
-                 """)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Text("Anchor only asks about an application that is already open, and never opens one to raise a prompt.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            VStack(spacing: 6) {
-                ForEach(model.scriptedApps, id: \.kind) { app in
-                    automationRow(app)
-                }
-            }
-            .padding(.top, 2)
-        }
-    }
-
-    private func automationRow(_ app: InstalledApp) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: model.isGranted(app) ? "checkmark.circle" : "circle.dashed")
-                .foregroundStyle(model.isGranted(app) ? Color.green : Color.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(app.kind.displayName).font(.callout)
-                Text(model.status(app)).font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            if model.asking.contains(app.kind) {
-                ProgressView().controlSize(.small)
-            } else {
-                Button("Ask") {
-                    Task { await model.requestAutomation(for: app.kind) }
-                }
-                .disabled(!model.canAsk(app))
-            }
-        }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var screenRecording: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            heading("Screen Recording", granted: model.screenRecordingGranted)
-            Text("""
-                 When you save a layout, Anchor takes one picture of that display, shrinks and \
-                 blurs it in memory, and keeps only the blurred version beside the layout. The \
-                 sharp picture is never written down, and Anchor's own windows are left out of it.
-                 """)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Text("Without it, saving works exactly the same and a layout's preview is drawn from its window rectangles instead.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Button("Grant Screen Recording") {
-                    Task { await model.requestScreenRecording() }
-                }
-                .disabled(model.screenRecordingGranted)
-                Button("Open Settings") { Permissions.openScreenRecordingSettings() }
-                    .buttonStyle(.link)
-            }
-            Text("macOS may need Anchor to be quit and opened again after this one is allowed.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if let issue = savedStates.thumbnailIssue, !issue.needsPermission {
-                Text(issue.message)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    private func heading(_ title: String, granted: Bool) -> some View {
-        HStack(spacing: 8) {
-            Text(title).font(.headline)
-            Label(granted ? "granted" : "not granted",
-                  systemImage: granted ? "checkmark.circle" : "exclamationmark.circle")
-                .labelStyle(.titleAndIcon)
-                .font(.caption)
-                .foregroundStyle(granted ? Color.green : Color.secondary)
-            Spacer(minLength: 0)
-        }
-    }
-
-    private var footer: some View {
-        HStack(spacing: 10) {
-            Button("Check Again") { Task { await refresh() } }
-                .disabled(refreshing)
-            if refreshing {
-                ProgressView().controlSize(.small)
-            }
-            Spacer()
-            Button("Continue") { onContinue() }
-                .keyboardShortcut(.defaultAction)
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
     }
 }

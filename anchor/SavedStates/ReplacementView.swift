@@ -93,176 +93,89 @@ enum SwitchBlocker {
 struct ReplacementConfirmView: View {
     @Bindable var model: SavedStatesModel
     let plan: RestorePlan
+    var keyboardAction: Int?
 
     var body: some View {
-        HStack(spacing: 6) {
-            Button("Open") { model.requestExecute() }
+        VStack(spacing: 6) {
+            Button { model.requestExecute() } label: {
+                Text("Open")
+                    .frame(maxWidth: .infinity)
+            }
+                .buttonStyle(PanelActionStyle(prominent: true))
+                .overlay { selectionOutline(0) }
                 .disabled(model.busy || plan.actionableWindowCount == 0)
                 .help("Opens the saved layout and closes nothing")
-            Button("Save & Switch") { model.requestReplacement(.saveThenReplace) }
+            Button { model.requestReplacement(.saveThenReplace) } label: {
+                Text("Save & Switch").frame(maxWidth: .infinity)
+            }
+                .buttonStyle(PanelActionStyle())
                 .disabled(!ready)
-            Button("Switch Without Saving") { model.requestReplacement(.replaceWithoutSaving) }
+                .help(SwitchBlocker.reason(model: model, plan: plan) ?? "Save the current layout, then switch")
+                .overlay { selectionOutline(1) }
+            Button { model.requestReplacement(.replaceWithoutSaving) } label: {
+                Text("Switch").frame(maxWidth: .infinity)
+            }
+                .buttonStyle(PanelActionStyle())
                 .disabled(!ready)
-            Spacer(minLength: 0)
+                .help(SwitchBlocker.reason(model: model, plan: plan) ?? "Closes the current layout without saving it, then opens this layout")
+                .accessibilityLabel("Switch without saving")
+                .overlay { selectionOutline(2) }
         }
         .font(.caption)
         .controlSize(.small)
     }
 
     private var ready: Bool { SwitchBlocker.ready(model: model, plan: plan) }
+
+    @ViewBuilder
+    private func selectionOutline(_ index: Int) -> some View {
+        if keyboardAction == index {
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(Color.primary.opacity(0.55), lineWidth: 1)
+                .allowsHitTesting(false)
+        }
+    }
 }
 
-func copy(_ text: String) {
-    let pasteboard = NSPasteboard.general
-    pasteboard.clearContents()
-    pasteboard.setString(text, forType: .string)
-}
-
-// one replacement while it runs and after it finishes
-// it stays here until the next one, so closing this panel loses nothing
+// the only switch screen that needs a decision rather than a report
 struct ReplacementProgressView: View {
     @Bindable var model: SavedStatesModel
-    @State private var showDetails = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PanelScroll(maxHeight: PanelMetrics.viewport(reserving: 200)) {
-                VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack {
-                            Text(title).font(.headline)
-                            Spacer()
-                            Button("Copy Report") { copy(model.replacement.report) }
-                                .buttonStyle(.link)
-                                .font(.caption)
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Some details weren’t saved", systemImage: "exclamationmark.triangle")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text("Review what’s missing before closing your current windows.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                if let partial = model.replacement.partialCapture {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(partial.summary)
+                        ForEach(Array(partial.omissions.enumerated()), id: \.offset) { _, text in
+                            Text(text)
                         }
-                        Text(model.replacement.summary).font(.caption).foregroundStyle(.secondary)
-                        Text("operation \(model.replacement.log.id) · \(model.replacement.log.counts), reopen launches \(model.restore.launchRequests)")
-                            .font(.caption2)
+                        Text("Unsaved documents and running terminal sessions are not backed up.")
                             .foregroundStyle(.secondary)
                     }
-                    if let reason = model.replacement.stopReason {
-                        Label(reason, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    if let saved = model.replacement.outgoingSaveSummary {
-                        Text("saved on the way out: \(saved)").font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if let notice = model.replacement.snapshotNotice {
-                        Text(notice).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if let partial = model.replacement.partialCapture {
-                        decision(partial)
-                    }
-                    closes
-                    if !model.restore.reports.isEmpty {
-                        Divider()
-                        Text("Reopening").font(.callout).bold()
-                        RestoreReportList(restore: model.restore)
-                    }
-                }
-                .padding(14)
-                .textSelection(.enabled)
-            }
-            Divider()
-            footer
-        }
-    }
-
-    private var closes: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Closing").font(.callout).bold()
-            Toggle("Show what happened to each window", isOn: $showDetails)
-                .toggleStyle(.checkbox)
-                .font(.caption2)
-            ForEach(model.replacement.closeReports) { report in
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 5) {
-                        Image(systemName: icon(report.state)).foregroundStyle(tint(report.state))
-                        Text(report.appName).font(.callout)
-                        Text(report.title ?? "no title").font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                        Spacer()
-                        Text(report.state.rawValue).font(.caption2).foregroundStyle(.secondary)
-                    }
-                    if showDetails {
-                        Text(report.detail).font(.caption2).foregroundStyle(.secondary).padding(.leading, 8)
-                    }
+                    .font(.caption2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-        }
-    }
-
-    // a save that came back with less than the screen held needs a decision of its own
-    private func decision(_ partial: ReplacementCoordinator.PartialCapture) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("The save did not capture everything").font(.callout).bold()
-            Text(SavedStatesFormat.completeness(partial.completeness))
-                .font(.caption)
-                .foregroundStyle(.orange)
-            Text(partial.summary).font(.caption2).foregroundStyle(.secondary)
-            ForEach(Array(partial.omissions.enumerated()), id: \.offset) { _, text in
-                Text(text).font(.caption2).foregroundStyle(.orange)
-            }
-            Text("This is a record of where things were. It is not a copy of unsaved documents or of anything a terminal is running.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Button("Close Those Windows Anyway") { model.requestPartialCaptureDecision() }
-                .frame(maxWidth: .infinity)
-            Button("Stop, Close Nothing") { model.replacement.cancel() }
-                .buttonStyle(.link)
-                .frame(maxWidth: .infinity)
-        }
-        .padding(8)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-    }
-
-    private var footer: some View {
-        HStack {
-            if model.replacement.isRunning {
-                Button("Cancel") { model.replacement.cancel() }
-                Text("windows already closed stay closed")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else {
-                Button("Saved States") { model.backToHome() }
-                Spacer()
-                Text("anchor never reopens what it closed as a rollback")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            .scrollIndicators(.hidden)
+            .scrollBounceBehavior(.basedOnSize)
+            HStack(spacing: 8) {
+                Button("Cancel Switch") {
+                    model.replacement.cancel()
+                    model.backToHome()
+                }
+                .buttonStyle(PanelActionStyle(prominent: true))
+                Button("Close Anyway") { model.requestPartialCaptureDecision() }
+                    .buttonStyle(PanelActionStyle())
             }
         }
-        .padding(14)
-    }
-
-    private var title: String {
-        switch model.replacement.stage {
-        case .idle, .preflight: return "Nothing has run yet"
-        case .saving: return "Saving the current state"
-        case .awaitingCaptureDecision: return "Waiting for your decision"
-        case .closing: return "Closing windows"
-        case .reopening: return "Reopening the saved state"
-        case .finished: return "Finished"
-        case .stopped: return "Stopped"
-        }
-    }
-
-    private func icon(_ state: ReplacementCoordinator.CloseReport.State) -> String {
-        switch state {
-        case .pending: return "clock"
-        case .requested: return "arrow.triangle.2.circlepath"
-        case .closed: return "checkmark.circle"
-        case .alreadyGone: return "minus.circle"
-        case .remaining, .refused: return "exclamationmark.circle"
-        case .notReached: return "xmark.circle"
-        }
-    }
-
-    private func tint(_ state: ReplacementCoordinator.CloseReport.State) -> Color {
-        switch state {
-        case .closed: return .green
-        case .remaining, .refused: return .orange
-        default: return .secondary
-        }
+        .padding(12)
+        .frame(height: PanelMetrics.panelHeight - PanelMetrics.barHeight - 36)
     }
 }
