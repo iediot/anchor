@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build, e.g. 1.0.0. The tag v<version> is created on the checked out commit if it does not exist.'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      SCHEME: anchor
+      PROJECT: anchor.xcodeproj
+      APP_NAME: anchor
+      # optional Developer ID signing + notarization; ad-hoc signing is used when unset
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      MACOS_TEAM_ID: ${{ secrets.MACOS_TEAM_ID }}
+      NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+      NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          set -euo pipefail
+          latest=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$latest" ]; then
+            sudo xcode-select -s "$latest/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i macos
+
+      - name: Resolve version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="v${{ inputs.version }}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing certificate
+        if: env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Archive
+        run: |
+          set -euo pipefail
+          if [ -n "$MACOS_SIGN_IDENTITY" ]; then
+            identity="$MACOS_SIGN_IDENTITY"
+            team="$MACOS_TEAM_ID"
+            extra_flags="--timestamp"
+          else
+            identity="-"
+            team=""
+            extra_flags=""
+          fi
+          if command -v xcbeautify >/dev/null 2>&1; then
+            formatter=(xcbeautify)
+          else
+            formatter=(cat)
+          fi
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -archivePath "$RUNNER_TEMP/$APP_NAME.xcarchive" \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$identity" \
+            DEVELOPMENT_TEAM="$team" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            OTHER_CODE_SIGN_FLAGS="$extra_flags" \
+            | "${formatter[@]}" || exit "${PIPESTATUS[0]}"
+
+      - name: Verify app
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/$APP_NAME.xcarchive/Products/Applications/$APP_NAME.app"
+          echo "APP_PATH=$app" >> "$GITHUB_ENV"
+          lipo -archs "$app/Contents/MacOS/$APP_NAME"
+          codesign --verify --strict --verbose=2 "$app"
+          codesign --display --entitlements - "$app" || true
+
+      - name: Notarize
+        if: env.NOTARY_APPLE_ID != '' && env.MACOS_CERT_P12 != ''
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent "$APP_PATH" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$MACOS_TEAM_ID" \
+            --password "$NOTARY_PASSWORD" \
+            --wait
+          xcrun stapler staple "$APP_PATH"
+
+      - name: Package
+        id: package
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          zip="$RUNNER_TEMP/Anchor-$version-macOS.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$zip"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 "$zip" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anchor-${{ steps.version.outputs.version }}-macOS
+          path: ${{ steps.package.outputs.zip }}
+
+      - name: Write release notes
+        id: notes
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo "Anchor ${{ steps.version.outputs.version }} for macOS 26.5 or later, Apple silicon and Intel."
+            echo
+            echo "Download the zip, unzip it, and move \`anchor.app\` to Applications."
+            echo
+            if [ -z "$NOTARY_APPLE_ID" ] || [ -z "$MACOS_CERT_P12" ]; then
+              echo "This build is not notarized. The first launch needs a right-click on the app and then Open, or System Settings then Privacy & Security then Open Anyway."
+              echo
+            fi
+            echo "Anchor asks for Automation and Accessibility permission the first time it captures or restores a layout."
+            echo
+            echo "\`\`\`"
+            echo "sha256  ${{ steps.package.outputs.sha }}"
+            echo "\`\`\`"
+          } > "$notes"
+          echo "path=$notes" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "${{ steps.package.outputs.zip }}" --clobber
+            gh release edit "$tag" --notes-file "${{ steps.notes.outputs.path }}"
+          else
+            gh release create "$tag" "${{ steps.package.outputs.zip }}" \
+              --title "Anchor ${{ steps.version.outputs.version }}" \
+              --notes-file "${{ steps.notes.outputs.path }}"
+          fi
